@@ -1,0 +1,25 @@
+[[tasks]]
+id = "list-current-dir"
+name = "List Current Directory"
+command = "ls -la"
+cwd = "."
+
+[[tasks]]
+id = "check-date"
+name = "Check System Date"
+command = "date"
+
+[[tasks]]
+id = "echo-hello"
+name = "Echo Hello"
+command = "echo 'Hello from CmdHub Core Prototype!'"
+
+[[tasks]]
+id = "ping-baidu"
+name = "Ping Baidu"
+command = "ping www.baidu.com"
+
+[[tasks]]
+id = "list-recursive"
+name = "List Recursive"
+command = "ls -R ."

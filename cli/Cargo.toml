@@ -1,0 +1,13 @@
+[package]
+name = "cmdhub-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cmdhub-core = { path = "../core" }
+tokio.workspace = true
+anyhow.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+log.workspace = true
+env_logger.workspace = true

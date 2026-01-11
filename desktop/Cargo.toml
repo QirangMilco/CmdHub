@@ -1,0 +1,8 @@
+[package]
+name = "cmdhub-desktop"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cmdhub-core = { path = "../core" }
+# Tauri dependencies will be added later
