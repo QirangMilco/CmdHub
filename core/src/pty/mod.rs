@@ -1,7 +1,7 @@
 use anyhow::Result;
 use portable_pty::{native_pty_system, Child, CommandBuilder, PtyPair, PtySize};
-use std::io::Read;
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 

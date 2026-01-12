@@ -2,32 +2,38 @@
 id = "list-current-dir"
 name = "List Current Directory"
 command = "ls -la"
+category = "Filesystem"
 cwd = "."
 
 [[tasks]]
 id = "check-date"
 name = "Check System Date"
 command = "date"
+category = "System"
 
 [[tasks]]
 id = "echo-hello"
 name = "Echo Hello"
 command = "echo 'Hello from CmdHub Core Prototype!'"
+category = "Demo"
 
 [[tasks]]
 id = "ping-baidu"
 name = "Ping Baidu"
 command = "ping www.baidu.com"
+category = "Network"
 
 [[tasks]]
 id = "list-recursive"
 name = "List Recursive"
 command = "ls -R ."
+category = "Filesystem"
 
 [[tasks]]
 id = "echo-with-inputs"
 name = "Echo With Inputs"
 command = "echo \"env={{env|dev}} name={{name|guest}} SAMPLE=$CMDHUB_SAMPLE\""
+category = "Demo"
 env_clear = false
 [tasks.env]
 CMDHUB_SAMPLE = "true"

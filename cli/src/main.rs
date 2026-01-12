@@ -10,6 +10,7 @@ use crossterm::{
 };
 use ratatui::{
     backend::{Backend, CrosstermBackend},
+    style::{Color, Modifier, Style},
     widgets::{
         Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
         ScrollbarOrientation, ScrollbarState, Wrap,
@@ -36,6 +37,7 @@ struct RunningTask {
 
 struct App {
     tasks: Vec<cmdhub_core::models::Task>,
+    display_items: Vec<DisplayItem>,
     list_state: ListState,
     running_tasks: HashMap<usize, RunningTask>,
     active_task_index: Option<usize>,
@@ -44,6 +46,12 @@ struct App {
     log_rx: mpsc::Receiver<(usize, Vec<u8>)>,
     log_tx: mpsc::Sender<(usize, Vec<u8>)>,
     input_state: Option<InputState>,
+}
+
+#[derive(Clone)]
+enum DisplayItem {
+    Header(String),
+    Task(usize),
 }
 
 enum InputValue {
@@ -68,13 +76,65 @@ struct InputState {
     selected: usize,
 }
 
+fn normalize_category(category: &Option<String>) -> String {
+    match category {
+        Some(value) if !value.trim().is_empty() => value.trim().to_string(),
+        _ => "Uncategorized".to_string(),
+    }
+}
+
+fn build_display_items(tasks: &[cmdhub_core::models::Task]) -> Vec<DisplayItem> {
+    let mut order: Vec<String> = Vec::new();
+    let mut grouped: HashMap<String, Vec<usize>> = HashMap::new();
+
+    for (index, task) in tasks.iter().enumerate() {
+        let category = normalize_category(&task.category);
+        if !grouped.contains_key(&category) {
+            order.push(category.clone());
+            grouped.insert(category.clone(), Vec::new());
+        }
+        if let Some(items) = grouped.get_mut(&category) {
+            items.push(index);
+        }
+    }
+
+    let mut items = Vec::new();
+    for category in order {
+        items.push(DisplayItem::Header(category.clone()));
+        if let Some(task_indices) = grouped.get(&category) {
+            for task_index in task_indices {
+                items.push(DisplayItem::Task(*task_index));
+            }
+        }
+    }
+
+    items
+}
+
+fn first_task_index(items: &[DisplayItem]) -> Option<usize> {
+    items
+        .iter()
+        .position(|item| matches!(item, DisplayItem::Task(_)))
+}
+
+fn selected_task_index(app: &App) -> Option<usize> {
+    let selected = app.list_state.selected()?;
+    match app.display_items.get(selected) {
+        Some(DisplayItem::Task(task_index)) => Some(*task_index),
+        _ => None,
+    }
+}
+
 impl App {
     fn new(tasks: Vec<cmdhub_core::models::Task>) -> App {
         let mut list_state = ListState::default();
-        list_state.select(Some(0));
+        let display_items = build_display_items(&tasks);
+        let initial_selection = first_task_index(&display_items);
+        list_state.select(initial_selection);
         let (tx, rx) = mpsc::channel(1000);
         App {
             tasks,
+            display_items,
             list_state,
             running_tasks: HashMap::new(),
             active_task_index: None,
@@ -87,31 +147,45 @@ impl App {
     }
 
     fn next(&mut self) {
-        let i = match self.list_state.selected() {
-            Some(i) => {
-                if i >= self.tasks.len() - 1 {
-                    0
-                } else {
-                    i + 1
-                }
-            }
-            None => 0,
+        let Some(selected) = self.list_state.selected() else {
+            self.list_state
+                .select(first_task_index(&self.display_items));
+            return;
         };
-        self.list_state.select(Some(i));
+        if self.display_items.is_empty() {
+            return;
+        }
+        let mut i = selected;
+        for _ in 0..self.display_items.len() {
+            i = (i + 1) % self.display_items.len();
+            if matches!(self.display_items[i], DisplayItem::Task(_)) {
+                self.list_state.select(Some(i));
+                return;
+            }
+        }
     }
 
     fn previous(&mut self) {
-        let i = match self.list_state.selected() {
-            Some(i) => {
-                if i == 0 {
-                    self.tasks.len() - 1
-                } else {
-                    i - 1
-                }
-            }
-            None => 0,
+        let Some(selected) = self.list_state.selected() else {
+            self.list_state
+                .select(first_task_index(&self.display_items));
+            return;
         };
-        self.list_state.select(Some(i));
+        if self.display_items.is_empty() {
+            return;
+        }
+        let mut i = selected;
+        for _ in 0..self.display_items.len() {
+            if i == 0 {
+                i = self.display_items.len() - 1;
+            } else {
+                i -= 1;
+            }
+            if matches!(self.display_items[i], DisplayItem::Task(_)) {
+                self.list_state.select(Some(i));
+                return;
+            }
+        }
     }
 
     async fn start_task(&mut self, index: usize) -> Result<()> {
@@ -333,12 +407,12 @@ async fn run_app<B: Backend + Write>(terminal: &mut Terminal<B>, mut app: App) -
                         KeyCode::Down => app.next(),
                         KeyCode::Up => app.previous(),
                         KeyCode::Enter => {
-                            if let Some(index) = app.list_state.selected() {
-                                if app.tasks[index]
+                            if let Some(index) = selected_task_index(&app) {
+                                let has_inputs = app.tasks[index]
                                     .inputs
                                     .as_ref()
-                                    .map_or(false, |v| !v.is_empty())
-                                {
+                                    .map_or(false, |v| !v.is_empty());
+                                if has_inputs {
                                     app.prepare_inputs(index);
                                 } else {
                                     app.start_task(index).await?;
@@ -500,16 +574,24 @@ fn ui(f: &mut Frame, app: &mut App) {
     match app.current_view {
         View::Selection => {
             let items: Vec<ListItem> = app
-                .tasks
+                .display_items
                 .iter()
                 .enumerate()
-                .map(|(i, t)| {
-                    let status = if app.running_tasks.contains_key(&i) {
-                        " [Running]"
-                    } else {
-                        ""
-                    };
-                    ListItem::new(format!("{}{}", t.name, status))
+                .map(|(_, item)| match item {
+                    DisplayItem::Header(title) => ListItem::new(format!("== {} ==", title)).style(
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    DisplayItem::Task(task_index) => {
+                        let status = if app.running_tasks.contains_key(task_index) {
+                            " [Running]"
+                        } else {
+                            ""
+                        };
+                        let task = &app.tasks[*task_index];
+                        ListItem::new(format!("{}{}", task.name, status))
+                    }
                 })
                 .collect();
             let list = List::new(items)
@@ -518,9 +600,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                         .title("Select Command (Enter to run/view, q to exit)")
                         .borders(Borders::ALL),
                 )
-                .highlight_style(
-                    ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD),
-                )
+                .highlight_style(Style::default().add_modifier(Modifier::BOLD))
                 .highlight_symbol(">> ");
             f.render_stateful_widget(list, area, &mut app.list_state);
         }

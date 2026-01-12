@@ -7,6 +7,7 @@ pub struct Task {
     pub id: String,
     pub name: String,
     pub command: String,
+    pub category: Option<String>,
     pub cwd: Option<PathBuf>,
     pub env: Option<HashMap<String, String>>,
     pub env_clear: Option<bool>,
