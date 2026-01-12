@@ -8,14 +8,22 @@ pub struct Task {
     pub name: String,
     pub command: String,
     pub cwd: Option<PathBuf>,
+    pub env: Option<HashMap<String, String>>,
+    pub env_clear: Option<bool>,
     pub inputs: Option<HashMap<String, InputConfig>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum InputConfig {
-    Select { options: Vec<String>, default: String },
-    Text { placeholder: Option<String>, default: Option<String> },
+    Select {
+        options: Vec<String>,
+        default: String,
+    },
+    Text {
+        placeholder: Option<String>,
+        default: Option<String>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

@@ -23,3 +23,14 @@ command = "ping www.baidu.com"
 id = "list-recursive"
 name = "List Recursive"
 command = "ls -R ."
+
+[[tasks]]
+id = "echo-with-inputs"
+name = "Echo With Inputs"
+command = "echo \"env={{env|dev}} name={{name|guest}} SAMPLE=$CMDHUB_SAMPLE\""
+env_clear = false
+[tasks.env]
+CMDHUB_SAMPLE = "true"
+[tasks.inputs]
+env = { type = "select", options = ["dev", "prod"], default = "dev" }
+name = { type = "text", placeholder = "your-name", default = "guest" }

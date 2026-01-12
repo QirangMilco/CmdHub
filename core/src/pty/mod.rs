@@ -1,6 +1,7 @@
 use anyhow::Result;
 use portable_pty::{native_pty_system, Child, CommandBuilder, PtyPair, PtySize};
 use std::io::Read;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
@@ -10,7 +11,12 @@ pub struct PtySession {
 }
 
 impl PtySession {
-    pub fn new(command: &str, cwd: Option<PathBuf>) -> Result<Self> {
+    pub fn new(
+        command: &str,
+        cwd: Option<PathBuf>,
+        env: Option<HashMap<String, String>>,
+        env_clear: bool,
+    ) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows: 24,
@@ -25,6 +31,14 @@ impl PtySession {
         if let Some(cwd) = cwd {
             cmd.cwd(cwd);
         }
+        if env_clear {
+            cmd.env_clear();
+        }
+        if let Some(env) = env {
+            for (key, value) in env {
+                cmd.env(key, value);
+            }
+        }
 
         let child = pair.slave.spawn_command(cmd)?;
 
@@ -33,7 +47,7 @@ impl PtySession {
 
     pub async fn run(&self, tx: mpsc::Sender<Vec<u8>>) -> Result<()> {
         let mut reader = self.pair.master.try_clone_reader()?;
-        
+
         tokio::task::spawn_blocking(move || {
             let mut buf = [0u8; 1024];
             while let Ok(n) = reader.read(&mut buf) {
