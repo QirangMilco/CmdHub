@@ -9,5 +9,6 @@ tokio.workspace = true
 anyhow.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+strip-ansi-escapes.workspace = true
 log.workspace = true
 env_logger.workspace = true

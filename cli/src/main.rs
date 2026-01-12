@@ -2,39 +2,61 @@ use anyhow::Result;
 use cmdhub_core::config::load_config;
 use cmdhub_core::pty::PtySession;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseEventKind},
+    cursor::MoveTo,
+    event::{self, DisableMouseCapture, Event, KeyCode, MouseEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode, Clear as TermClear, ClearType},
 };
 use ratatui::{
     backend::{Backend, CrosstermBackend},
-    layout::{Constraint, Direction, Layout},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{
+        Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Wrap,
+    },
     Frame, Terminal,
 };
+use std::collections::HashMap;
 use std::io;
+use std::io::Write;
 use tokio::sync::mpsc;
+
+#[derive(PartialEq, Copy, Clone)]
+enum View {
+    Selection,
+    Terminal,
+}
+
+struct RunningTask {
+    session: PtySession,
+    logs: String,
+    scroll: u16,
+}
 
 struct App {
     tasks: Vec<cmdhub_core::models::Task>,
     list_state: ListState,
-    logs: String,
-    rx: Option<mpsc::Receiver<Vec<u8>>>,
-    session: Option<PtySession>,
-    scroll: u16,
+    running_tasks: HashMap<usize, RunningTask>,
+    active_task_index: Option<usize>,
+    current_view: View,
+    use_native_scrollback: bool,
+    log_rx: mpsc::Receiver<(usize, Vec<u8>)>,
+    log_tx: mpsc::Sender<(usize, Vec<u8>)>,
 }
 
 impl App {
     fn new(tasks: Vec<cmdhub_core::models::Task>) -> App {
         let mut list_state = ListState::default();
         list_state.select(Some(0));
+        let (tx, rx) = mpsc::channel(1000);
         App {
             tasks,
             list_state,
-            logs: String::new(),
-            rx: None,
-            session: None,
-            scroll: 0,
+            running_tasks: HashMap::new(),
+            active_task_index: None,
+            current_view: View::Selection,
+            use_native_scrollback: true,
+            log_rx: rx,
+            log_tx: tx,
         }
     }
 
@@ -65,32 +87,91 @@ impl App {
         };
         self.list_state.select(Some(i));
     }
+
+    async fn start_task(&mut self, index: usize) -> Result<()> {
+        if !self.running_tasks.contains_key(&index) {
+            let task = &self.tasks[index];
+            let session = PtySession::new(&task.command, task.cwd.clone())?;
+            
+            let tx = self.log_tx.clone();
+            let task_index = index;
+            
+            let (session_tx, mut session_rx) = mpsc::channel::<Vec<u8>>(100);
+            session.run(session_tx).await?;
+
+            tokio::spawn(async move {
+                while let Some(data) = session_rx.recv().await {
+                    if tx.send((task_index, data)).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            self.running_tasks.insert(index, RunningTask {
+                session,
+                logs: String::new(),
+                scroll: 0,
+            });
+        }
+        
+        self.active_task_index = Some(index);
+        self.current_view = View::Terminal;
+        Ok(())
+    }
+
+    fn kill_active_task(&mut self) -> Result<()> {
+        if let Some(index) = self.active_task_index {
+            if let Some(mut task) = self.running_tasks.remove(&index) {
+                task.session.kill()?;
+            }
+            self.current_view = View::Selection;
+        }
+        Ok(())
+    }
+
+    fn kill_all_tasks(&mut self) -> Result<()> {
+        for (_, mut task) in self.running_tasks.drain() {
+            let _ = task.session.kill();
+        }
+        Ok(())
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        let _ = self.kill_all_tasks();
+    }
+}
+
+fn sanitize_log_chunk(data: &[u8]) -> String {
+    let cleaned = strip_ansi_escapes::strip(data);
+    String::from_utf8_lossy(&cleaned)
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Setup terminal
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
     // Load config
     let config = load_config("config.toml").await?;
     let app = App::new(config.tasks);
+
+    // Setup terminal
+    let mut stdout = io::stdout();
+    execute!(stdout, TermClear(ClearType::All), MoveTo(0, 0))?;
+    enable_raw_mode()?;
+    execute!(stdout, DisableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
 
     // Run app
     let res = run_app(&mut terminal, app).await;
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    execute!(terminal.backend_mut(), DisableMouseCapture)?;
     terminal.show_cursor()?;
+    println!("--- CmdHub exited ---");
 
     if let Err(err) = res {
         println!("{:?}", err)
@@ -99,83 +180,106 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> Result<()> {
+async fn run_app<B: Backend + Write>(terminal: &mut Terminal<B>, mut app: App) -> Result<()> {
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
 
-        if let Some(ref mut rx) = app.rx {
-            while let Ok(data) = rx.try_recv() {
-                app.logs.push_str(&String::from_utf8_lossy(&data).replace("\r\n", "\n").replace('\r', "\n"));
+        while let Ok((idx, data)) = app.log_rx.try_recv() {
+            if let Some(task) = app.running_tasks.get_mut(&idx) {
+                let normalized = sanitize_log_chunk(&data);
+                task.logs.push_str(&normalized);
                 
-                // Performance: Limit logs buffer to last 1000 lines
-                let lines: Vec<&str> = app.logs.lines().collect();
-                if lines.len() > 1000 {
-                    app.logs = lines[lines.len() - 1000..].join("\n");
+                // Performance: Limit logs buffer to last 2000 lines
+                let lines: Vec<&str> = task.logs.lines().collect();
+                if lines.len() > 2000 {
+                    task.logs = lines[lines.len() - 2000..].join("\n");
                 }
 
-                // Auto scroll to bottom
-                let line_count = app.logs.lines().count() as u16;
-                let height = terminal.size()?.height.saturating_sub(2); // subtract borders
-                if app.scroll >= line_count.saturating_sub(height + 1) {
-                    if line_count > height {
-                        app.scroll = line_count - height;
-                    }
+                // Auto scroll to bottom if we are near the bottom
+                let line_count = task.logs.lines().count() as u16;
+                let height = terminal.size()?.height.saturating_sub(2);
+                let max_scroll = line_count.saturating_sub(height);
+                if app.use_native_scrollback {
+                    task.scroll = max_scroll;
+                } else if task.scroll >= max_scroll {
+                    task.scroll = max_scroll;
                 }
             }
         }
 
-        if event::poll(std::time::Duration::from_millis(100))? {
+        if event::poll(std::time::Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key) => {
-                    match key.code {
-                        KeyCode::Char('q') => return Ok(()),
-                        KeyCode::Down => app.next(),
-                        KeyCode::Up => app.previous(),
-                        KeyCode::PageDown => {
-                            let line_count = app.logs.lines().count() as u16;
-                            // Allow scrolling beyond logical lines because of Wrap
-                            app.scroll = app.scroll.saturating_add(5).min(line_count * 3);
-                        }
-                        KeyCode::PageUp => {
-                            app.scroll = app.scroll.saturating_sub(5);
-                        }
-                        KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
-                            if let Some(ref mut session) = app.session {
-                                session.kill()?;
-                                app.logs.push_str("\n[Command Interrupted]\n");
+                    match app.current_view {
+                        View::Selection => match key.code {
+                            KeyCode::Char('q') => {
+                                app.kill_all_tasks()?;
+                                return Ok(());
                             }
-                        }
-                        KeyCode::Esc => {
-                            if let Some(ref mut session) = app.session {
-                                session.kill()?;
-                                app.logs.push_str("\n[Command Terminated]\n");
+                            KeyCode::Down => app.next(),
+                            KeyCode::Up => app.previous(),
+                            KeyCode::Enter => {
+                                if let Some(index) = app.list_state.selected() {
+                                    app.start_task(index).await?;
+                                }
                             }
-                        }
-                        KeyCode::Enter => {
-                            if let Some(index) = app.list_state.selected() {
-                                let task = &app.tasks[index];
-                                let (tx, rx) = mpsc::channel(100);
-                                let session = PtySession::new(&task.command, task.cwd.clone())?;
-                                session.run(tx).await?;
-                                app.session = Some(session);
-                                app.rx = Some(rx);
-                                app.logs.clear();
-                                app.scroll = 0;
+                            _ => {}
+                        },
+                        View::Terminal => match key.code {
+                            KeyCode::Esc => {
+                                app.kill_active_task()?;
                             }
-                        }
-                        _ => {}
+                            KeyCode::Char('q') | KeyCode::Backspace => {
+                                app.current_view = View::Selection;
+                            }
+                            KeyCode::PageDown => {
+                                if app.use_native_scrollback {
+                                    continue;
+                                }
+                                if let Some(index) = app.active_task_index {
+                                    if let Some(task) = app.running_tasks.get_mut(&index) {
+                                        let line_count = task.logs.lines().count() as u16;
+                                        let height = terminal.size()?.height.saturating_sub(2);
+                                        let max_scroll = line_count.saturating_sub(height);
+                                        task.scroll = task.scroll.saturating_add(5).min(max_scroll);
+                                    }
+                                }
+                            }
+                            KeyCode::PageUp => {
+                                if app.use_native_scrollback {
+                                    continue;
+                                }
+                                if let Some(index) = app.active_task_index {
+                                    if let Some(task) = app.running_tasks.get_mut(&index) {
+                                        task.scroll = task.scroll.saturating_sub(5);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        },
                     }
                 }
                 Event::Mouse(mouse_event) => {
-                    match mouse_event.kind {
-                        MouseEventKind::ScrollUp => {
-                            app.scroll = app.scroll.saturating_sub(2);
+                    if app.use_native_scrollback {
+                        continue;
+                    }
+                    if app.current_view == View::Terminal {
+                        if let Some(index) = app.active_task_index {
+                            if let Some(task) = app.running_tasks.get_mut(&index) {
+                                match mouse_event.kind {
+                                    MouseEventKind::ScrollUp => {
+                                        task.scroll = task.scroll.saturating_sub(2);
+                                    }
+                                    MouseEventKind::ScrollDown => {
+                                        let line_count = task.logs.lines().count() as u16;
+                                        let height = terminal.size()?.height.saturating_sub(2);
+                                        let max_scroll = line_count.saturating_sub(height);
+                                        task.scroll = task.scroll.saturating_add(2).min(max_scroll);
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
-                        MouseEventKind::ScrollDown => {
-                            let line_count = app.logs.lines().count() as u16;
-                            app.scroll = app.scroll.saturating_add(2).min(line_count * 3);
-                        }
-                        _ => {}
                     }
                 }
                 _ => {}
@@ -185,48 +289,78 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> Result
 }
 
 fn ui(f: &mut Frame, app: &mut App) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)].as_ref())
-        .split(f.size());
+    let area = f.size();
+    f.render_widget(Clear, area);
+    match app.current_view {
+        View::Selection => {
+            let items: Vec<ListItem> = app
+                .tasks
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    let status = if app.running_tasks.contains_key(&i) {
+                        " [Running]"
+                    } else {
+                        ""
+                    };
+                    ListItem::new(format!("{}{}", t.name, status))
+                })
+                .collect();
+            let list = List::new(items)
+                .block(Block::default().title("Select Command (Enter to run/view, q to exit)").borders(Borders::ALL))
+                .highlight_style(ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD))
+                .highlight_symbol(">> ");
+            f.render_stateful_widget(list, area, &mut app.list_state);
+        }
+        View::Terminal => {
+            if let Some(index) = app.active_task_index {
+                if let Some(task) = app.running_tasks.get(&index) {
+                    let line_count = task.logs.lines().count();
+                    let height = area.height.saturating_sub(2) as usize;
 
-    // Left: Tasks
-    let items: Vec<ListItem> = app
-        .tasks
-        .iter()
-        .map(|t| ListItem::new(t.name.clone()))
-        .collect();
-    let list = List::new(items)
-        .block(Block::default().title("Tasks").borders(Borders::ALL))
-        .highlight_style(ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD))
-        .highlight_symbol(">> ");
-    f.render_stateful_widget(list, chunks[0], &mut app.list_state);
+                    let title = if line_count > height {
+                        let top = task.scroll as usize + 1;
+                        let bottom = (task.scroll as usize + height).min(line_count);
+                        let percent = if line_count == 0 {
+                            0
+                        } else {
+                            (bottom * 100) / line_count
+                        };
+                        format!(
+                            "Logs: {} [Lines {}-{} / {} ({}%)] (Esc: Kill, q/Backspace: Back)",
+                            app.tasks[index].name,
+                            top,
+                            bottom,
+                            line_count,
+                            percent
+                        )
+                    } else {
+                        format!("Logs: {} (Esc: Kill, q/Backspace: Back)", app.tasks[index].name)
+                    };
 
-    // Right: Logs
-    f.render_widget(Clear, chunks[1]); // Clear the area to prevent artifacts
-    let line_count = app.logs.lines().count();
-    let height = chunks[1].height.saturating_sub(2) as usize;
-    
-    // tmux style indicator: [Scroll: 10/100]
-    let title = if line_count > height {
-        format!(
-            "Logs [Line {}/{}] (Esc to kill)",
-            app.scroll + 1,
-            line_count
-        )
-    } else {
-        "Logs (Esc to kill)".to_string()
-    };
+                    let log_block = Block::default()
+                        .title(title)
+                        .borders(Borders::ALL)
+                        .border_style(ratatui::style::Style::default().fg(ratatui::style::Color::Cyan));
+                    
+                    let logs = Paragraph::new(task.logs.as_str())
+                        .block(log_block)
+                        .wrap(Wrap { trim: false })
+                        .scroll((task.scroll, 0));
+                    
+                    f.render_widget(logs, area);
 
-    let log_block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(ratatui::style::Style::default().fg(ratatui::style::Color::Cyan));
-    
-    let logs = Paragraph::new(app.logs.as_str())
-        .block(log_block)
-        .wrap(Wrap { trim: false })
-        .scroll((app.scroll, 0));
-    
-    f.render_widget(logs, chunks[1]);
+                    if line_count > height && !app.use_native_scrollback {
+                        let mut scrollbar_state =
+                            ScrollbarState::new(line_count).position(task.scroll as usize);
+                        let scrollbar = Scrollbar::default()
+                            .orientation(ScrollbarOrientation::VerticalRight)
+                            .begin_symbol(None)
+                            .end_symbol(None);
+                        f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+                    }
+                }
+            }
+        }
+    }
 }
