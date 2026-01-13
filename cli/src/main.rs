@@ -12,6 +12,7 @@ use crossterm::{
 use ratatui::{
     backend::{Backend, CrosstermBackend},
     style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
     widgets::{
         Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
         ScrollbarOrientation, ScrollbarState, Wrap,
@@ -457,10 +458,157 @@ impl App {
 }
 
 fn sanitize_log_chunk(data: &[u8]) -> String {
-    let cleaned = strip_ansi_escapes::strip(data);
-    String::from_utf8_lossy(&cleaned)
+    String::from_utf8_lossy(data)
         .replace("\r\n", "\n")
         .replace('\r', "\n")
+}
+
+fn parse_ansi_text(input: &str) -> Text<'static> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut style = Style::default();
+    let mut buffer = String::new();
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && matches!(chars.peek(), Some('[')) {
+            chars.next();
+            if !buffer.is_empty() {
+                spans.push(Span::styled(buffer.clone(), style));
+                buffer.clear();
+            }
+            let mut sequence = String::new();
+            while let Some(next) = chars.next() {
+                if next == 'm' {
+                    apply_sgr(&sequence, &mut style);
+                    break;
+                }
+                sequence.push(next);
+            }
+            continue;
+        }
+
+        if ch == '\n' {
+            if !buffer.is_empty() {
+                spans.push(Span::styled(buffer.clone(), style));
+                buffer.clear();
+            }
+            lines.push(Line::from(spans));
+            spans = Vec::new();
+        } else {
+            buffer.push(ch);
+        }
+    }
+
+    if !buffer.is_empty() {
+        spans.push(Span::styled(buffer, style));
+    }
+    if !spans.is_empty() {
+        lines.push(Line::from(spans));
+    }
+
+    Text::from(lines)
+}
+
+fn apply_sgr(sequence: &str, style: &mut Style) {
+    let codes: Vec<i64> = if sequence.is_empty() {
+        vec![0]
+    } else {
+        sequence
+            .split(';')
+            .filter_map(|value| value.parse::<i64>().ok())
+            .collect()
+    };
+
+    let mut index = 0;
+    while index < codes.len() {
+        match codes[index] {
+            0 => *style = Style::default(),
+            1 => *style = style.add_modifier(Modifier::BOLD),
+            2 => *style = style.add_modifier(Modifier::DIM),
+            3 => *style = style.add_modifier(Modifier::ITALIC),
+            4 => *style = style.add_modifier(Modifier::UNDERLINED),
+            7 => *style = style.add_modifier(Modifier::REVERSED),
+            9 => *style = style.add_modifier(Modifier::CROSSED_OUT),
+            22 => *style = style.remove_modifier(Modifier::BOLD | Modifier::DIM),
+            23 => *style = style.remove_modifier(Modifier::ITALIC),
+            24 => *style = style.remove_modifier(Modifier::UNDERLINED),
+            27 => *style = style.remove_modifier(Modifier::REVERSED),
+            29 => *style = style.remove_modifier(Modifier::CROSSED_OUT),
+            30..=37 | 90..=97 => style.fg = ansi_color(codes[index]),
+            40..=47 | 100..=107 => {
+                let fg_code = codes[index] - 10;
+                style.bg = ansi_color(fg_code);
+            }
+            38 | 48 => {
+                let is_fg = codes[index] == 38;
+                if index + 1 < codes.len() {
+                    match codes[index + 1] {
+                        5 if index + 2 < codes.len() => {
+                            let color = Color::Indexed(clamp_u8(codes[index + 2]));
+                            if is_fg {
+                                style.fg = Some(color);
+                            } else {
+                                style.bg = Some(color);
+                            }
+                            index += 3;
+                            continue;
+                        }
+                        2 if index + 4 < codes.len() => {
+                            let r = clamp_u8(codes[index + 2]);
+                            let g = clamp_u8(codes[index + 3]);
+                            let b = clamp_u8(codes[index + 4]);
+                            let color = Color::Rgb(r, g, b);
+                            if is_fg {
+                                style.fg = Some(color);
+                            } else {
+                                style.bg = Some(color);
+                            }
+                            index += 5;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            39 => style.fg = None,
+            49 => style.bg = None,
+            _ => {}
+        }
+        index += 1;
+    }
+}
+
+fn ansi_color(code: i64) -> Option<Color> {
+    match code {
+        30 => Some(Color::Black),
+        31 => Some(Color::Red),
+        32 => Some(Color::Green),
+        33 => Some(Color::Yellow),
+        34 => Some(Color::Blue),
+        35 => Some(Color::Magenta),
+        36 => Some(Color::Cyan),
+        37 => Some(Color::Gray),
+        90 => Some(Color::DarkGray),
+        91 => Some(Color::LightRed),
+        92 => Some(Color::LightGreen),
+        93 => Some(Color::LightYellow),
+        94 => Some(Color::LightBlue),
+        95 => Some(Color::LightMagenta),
+        96 => Some(Color::LightCyan),
+        97 => Some(Color::White),
+        _ => None,
+    }
+}
+
+fn clamp_u8(value: i64) -> u8 {
+    if value < 0 {
+        0
+    } else if value > 255 {
+        255
+    } else {
+        value as u8
+    }
 }
 
 async fn load_history_limit() -> Result<usize> {
@@ -1249,7 +1397,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                             ratatui::style::Style::default().fg(ratatui::style::Color::Cyan),
                         );
 
-                    let logs = Paragraph::new(task.logs.as_str())
+                    let logs = Paragraph::new(parse_ansi_text(task.logs.as_str()))
                         .block(log_block)
                         .wrap(Wrap { trim: false })
                         .scroll((task.scroll, 0));
