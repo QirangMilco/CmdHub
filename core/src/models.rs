@@ -30,4 +30,5 @@ pub enum InputConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppConfig {
     pub tasks: Vec<Task>,
+    pub history_limit: Option<usize>,
 }

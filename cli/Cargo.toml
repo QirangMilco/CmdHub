@@ -12,3 +12,5 @@ crossterm.workspace = true
 strip-ansi-escapes.workspace = true
 log.workspace = true
 env_logger.workspace = true
+uuid.workspace = true
+portable-pty.workspace = true

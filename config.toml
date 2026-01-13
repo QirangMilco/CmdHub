@@ -1,3 +1,5 @@
+history_limit = 10
+
 [[tasks]]
 id = "list-current-dir"
 name = "List Current Directory"
