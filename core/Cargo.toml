@@ -12,4 +12,5 @@ anyhow.workspace = true
 thiserror.workspace = true
 log.workspace = true
 portable-pty.workspace = true
+libc.workspace = true
 uuid.workspace = true

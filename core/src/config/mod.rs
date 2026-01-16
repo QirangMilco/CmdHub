@@ -4,10 +4,39 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 
 const CONFIG_FILE_NAME: &str = "config.toml";
+const TASKS_DIR_NAME: &str = "tasks";
 
 pub async fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig> {
-    let content = fs::read_to_string(path).await?;
-    let config: AppConfig = toml::from_str(&content)?;
+    let content = fs::read_to_string(&path).await?;
+    let mut config: AppConfig = toml::from_str(&content)?;
+    
+    // Check for tasks directory relative to config file
+    if let Some(parent) = path.as_ref().parent() {
+        let tasks_dir = parent.join(TASKS_DIR_NAME);
+        if tasks_dir.exists() && tasks_dir.is_dir() {
+            let mut entries = fs::read_dir(tasks_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "toml") {
+                    if let Ok(content) = fs::read_to_string(&path).await {
+                        // We assume task files contain a [[tasks]] array or similar structure
+                        // For simplicity, let's try to parse as AppConfig partial and merge tasks
+                        #[derive(serde::Deserialize)]
+                        struct PartialConfig {
+                            tasks: Option<Vec<crate::models::Task>>,
+                        }
+                        
+                        if let Ok(partial) = toml::from_str::<PartialConfig>(&content) {
+                            if let Some(tasks) = partial.tasks {
+                                config.tasks.extend(tasks);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
     Ok(config)
 }
 

@@ -1,5 +1,33 @@
 history_limit = 10
 
+# UI Configuration
+[ui]
+# Supported colors: black, red, green, yellow, blue, magenta, cyan, white
+# Bright colors: light_black (gray), light_red, etc.
+# Styles: bold, dim, italic, underline, blink, reverse, hidden
+# You can combine them, e.g., "white bold", "light_blue italic"
+
+status_bar_fg = "white bold"
+status_bar_bg = "blue"
+command_mode_fg = "white bold"
+command_mode_bg = "red"
+
+# Key Bindings Configuration
+[keys.task_list]
+quit = "q"              # 退出程序 。会终止所有正在运行的任务并关闭 CmdHub CLI。
+up = "up"               
+down = "down"
+select = "enter"
+delete_instance = "d"   # 移除记录 。仅能移除状态为“已退出 (Exited)”的任务记录。正在运行的任务无法被移除。
+kill_instance = "X"     # 强制终止任务 。会发送 SIGKILL 信号给任务进程，强制终止任务。
+fold_task = "tab"
+
+[keys.task_running]
+toggle_command_mode = "ctrl+p" 
+back_to_list = "b"    # 后台挂起 。断开当前终端连接并返回任务列表，但任务 继续在后台运行 。稍后可再次进入。
+quit_task = "q"       # 后台挂起 （同上）。当前实现中，它的行为与 back_to_list 完全一致，主要是为了兼容习惯。
+kill_task = "k"       # 终止并返回 。直接杀死当前正在运行的任务进程，然后返回任务列表。
+
 [[tasks]]
 id = "list-current-dir"
 name = "List Current Directory"
@@ -42,15 +70,3 @@ id = "list-recursive"
 name = "List Recursive"
 command = "ls -R ."
 category = "Filesystem"
-
-[[tasks]]
-id = "echo-with-inputs"
-name = "Echo With Inputs"
-command = "echo \"env={{env|dev}} name={{name|guest}} SAMPLE=$CMDHUB_SAMPLE\""
-category = "Demo"
-env_clear = false
-[tasks.env]
-CMDHUB_SAMPLE = "true"
-[tasks.inputs]
-env = { type = "select", options = ["dev", "prod"], default = "dev" }
-name = { type = "text", placeholder = "your-name", default = "guest" }

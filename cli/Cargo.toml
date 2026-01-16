@@ -14,3 +14,5 @@ log.workspace = true
 env_logger.workspace = true
 uuid.workspace = true
 portable-pty.workspace = true
+signal-hook.workspace = true
+libc.workspace = true
