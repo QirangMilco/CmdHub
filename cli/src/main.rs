@@ -414,7 +414,7 @@ impl App {
              }
         } else if check("kill_instance", &key) {
              if let Some(Entry::Instance { instance_id }) = self.entries.get(self.selected) {
-                 let _ = self.manager.kill(instance_id);
+                 let _ = self.manager.kill_and_remove(instance_id);
              }
         } else if check("select", &key) {
              if let Some(entry) = self.entries.get(self.selected).cloned() {
@@ -554,7 +554,12 @@ impl App {
                 key_config: self.key_bindings.clone(),
             });
         } else {
-            self.last_error = Some("Instance is already attached".to_string());
+            let status = self.manager.get_status(instance_id).ok().flatten();
+            if status.is_none() {
+                self.last_error = Some("Instance not found".to_string());
+            } else {
+                self.last_error = Some("Instance is already attached".to_string());
+            }
         }
         Ok(())
     }
@@ -811,7 +816,7 @@ fn run_passthrough_inner(request: &mut PassthroughRequest, manager: &SessionMana
                         if matches_key(&key, quit_key) || matches_key(&key, back_key) {
                             break PassthroughOutcome::BackToList;
                         } else if matches_key(&key, kill_key) {
-                            let _ = manager.kill(&request.instance_id);
+                            let _ = manager.kill_and_remove(&request.instance_id);
                             break PassthroughOutcome::BackToList;
                         }
                     } else if let Some(bytes) = key_event_to_bytes(&key) {

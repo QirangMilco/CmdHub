@@ -2,8 +2,10 @@ use crate::models::Task;
 use anyhow::{anyhow, Result};
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use std::collections::{HashMap, VecDeque};
+use std::fs;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +71,7 @@ struct InstanceEntry {
     info: InstanceInfo,
     killer: Box<dyn ChildKiller + Send + Sync>,
     buffer: RingBuffer,
+    osc_parser: OscParser,
     master: Option<Box<dyn MasterPty + Send>>,
     writer: Option<Box<dyn Write + Send>>,
 }
@@ -100,11 +103,19 @@ impl SessionManager {
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
         let mut cmd = CommandBuilder::new(&shell);
-        cmd.arg("-c");
-        
-        // Ensure the shell remains open after the command finishes
-        let final_command = format!("{}; exec {}", command, shell);
-        cmd.arg(final_command);
+        if is_bash_shell(&shell) {
+            let rcfile = ensure_bash_rcfile()?;
+            cmd.arg("--noprofile");
+            cmd.arg("--rcfile");
+            cmd.arg(&rcfile);
+            cmd.arg("-i");
+            cmd.env("CMDHUB_INIT_CMD", command);
+        } else {
+            cmd.arg("-c");
+            // Ensure the shell remains open after the command finishes
+            let final_command = format!("{}; exec {}", command, shell);
+            cmd.arg(final_command);
+        }
 
         if let Some(cwd) = task.cwd.clone() {
             cmd.cwd(cwd);
@@ -142,6 +153,7 @@ impl SessionManager {
             info: info.clone(),
             killer,
             buffer: RingBuffer::new(self.buffer_cap),
+            osc_parser: OscParser::new(),
             master: None,
             writer: None,
         };
@@ -192,7 +204,17 @@ impl SessionManager {
         let mut guard = self.instances.lock().map_err(|_| anyhow!("instance lock poisoned"))?;
         if let Some(entry) = guard.get_mut(id) {
             entry.buffer.push(data);
-            if let Some(title) = parse_title(data) {
+            let mut titles = Vec::new();
+            entry.osc_parser.collect_titles(data, &mut titles);
+            let mut last_title = None;
+            for title in titles {
+                if title.trim().starts_with("CMDHUB:") {
+                    let _ = apply_cmdhub_title(&title, &mut entry.info);
+                } else {
+                    last_title = Some(title);
+                }
+            }
+            if let Some(title) = last_title {
                 entry.info.title = Some(title);
             }
         }
@@ -212,6 +234,23 @@ impl SessionManager {
         let entry = guard.get_mut(id).ok_or_else(|| anyhow!("instance not found"))?;
         entry.killer.kill()?;
         Ok(())
+    }
+
+    pub fn kill_and_remove(&self, id: &str) -> Result<bool> {
+        let entry = {
+            let mut guard = self.instances.lock().map_err(|_| anyhow!("instance lock poisoned"))?;
+            guard.remove(id)
+        };
+        if let Some(mut entry) = entry {
+            let _ = entry.killer.kill();
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub fn remove(&self, id: &str) -> Result<bool> {
+        let mut guard = self.instances.lock().map_err(|_| anyhow!("instance lock poisoned"))?;
+        Ok(guard.remove(id).is_some())
     }
 
     pub fn take_master(&self, id: &str) -> Result<Option<(Box<dyn MasterPty + Send>, Box<dyn Write + Send>)>> {
@@ -273,25 +312,192 @@ fn now_epoch() -> u64 {
         .unwrap_or_default()
 }
 
-fn parse_title(data: &[u8]) -> Option<String> {
-    // Simple parser for xterm title sequences: \x1b]0;TITLE\x07 or \x1b]2;TITLE\x07
-    // This is a heuristic and might miss split sequences or support only basic cases.
-    let mut i = 0;
-    while i < data.len() {
-        if data[i] == 0x1b && i + 3 < data.len() {
-            // Check for ]0; or ]2;
-            if data[i+1] == b']' && (data[i+2] == b'0' || data[i+2] == b'2') && data[i+3] == b';' {
-                let start = i + 4;
-                // Find terminator \x07 (BEL)
-                if let Some(end) = data[start..].iter().position(|&b| b == 0x07) {
-                    let title_bytes = &data[start..start+end];
-                    if let Ok(title) = std::str::from_utf8(title_bytes) {
-                        return Some(title.to_string());
+const OSC_TITLE_LIMIT: usize = 2048;
+
+struct OscParser {
+    state: OscState,
+    buf: Vec<u8>,
+}
+
+enum OscState {
+    Idle,
+    Esc,
+    Osc,
+    OscCode,
+    Collect,
+}
+
+impl OscParser {
+    fn new() -> Self {
+        Self {
+            state: OscState::Idle,
+            buf: Vec::new(),
+        }
+    }
+
+    fn collect_titles(&mut self, data: &[u8], titles: &mut Vec<String>) {
+        for &b in data {
+            match self.state {
+                OscState::Idle => {
+                    if b == 0x1b {
+                        self.state = OscState::Esc;
+                    }
+                }
+                OscState::Esc => {
+                    if b == b']' {
+                        self.state = OscState::Osc;
+                    } else if b != 0x1b {
+                        self.state = OscState::Idle;
+                    }
+                }
+                OscState::Osc => {
+                    if b == b'0' || b == b'2' {
+                        self.state = OscState::OscCode;
+                    } else {
+                        self.state = OscState::Idle;
+                    }
+                }
+                OscState::OscCode => {
+                    if b == b';' {
+                        self.buf.clear();
+                        self.state = OscState::Collect;
+                    } else {
+                        self.state = OscState::Idle;
+                    }
+                }
+                OscState::Collect => {
+                    if b == 0x07 {
+                        if let Ok(title) = std::str::from_utf8(&self.buf) {
+                            titles.push(title.to_string());
+                        }
+                        self.buf.clear();
+                        self.state = OscState::Idle;
+                    } else if self.buf.len() < OSC_TITLE_LIMIT {
+                        self.buf.push(b);
                     }
                 }
             }
         }
-        i += 1;
     }
-    None
+}
+
+fn apply_cmdhub_title(title: &str, info: &mut InstanceInfo) -> bool {
+    let title = title.trim();
+    let payload = match title.strip_prefix("CMDHUB:") {
+        Some(payload) => payload,
+        None => return false,
+    };
+    let mut state = None;
+    let mut pid = None;
+    let mut code = None;
+    for part in payload.split(';') {
+        let mut kv = part.splitn(2, '=');
+        let key = kv.next().unwrap_or("").trim();
+        let value = kv.next().unwrap_or("").trim();
+        match key {
+            "state" => state = Some(value.to_string()),
+            "pid" => pid = value.parse::<u32>().ok(),
+            "code" => code = value.parse::<u32>().ok(),
+            _ => {}
+        }
+    }
+
+    match state.as_deref() {
+        Some("running") => {
+            info.status = InstanceStatus::Running;
+            info.ended_at = None;
+            info.child_pid = pid.or(info.child_pid);
+            true
+        }
+        Some("exited") => {
+            let exit_code = code.unwrap_or(0);
+            info.status = InstanceStatus::Exited(exit_code);
+            info.ended_at = Some(now_epoch());
+            true
+        }
+        _ => false,
+    }
+}
+
+fn is_bash_shell(shell: &str) -> bool {
+    shell.ends_with("bash") || shell.contains("/bash")
+}
+
+fn ensure_bash_rcfile() -> Result<String> {
+    static RCFILE: OnceLock<String> = OnceLock::new();
+    if let Some(path) = RCFILE.get() {
+        return Ok(path.clone());
+    }
+    let mut path = std::env::temp_dir();
+    path.push("cmdhub_bashrc");
+    let rc = r#"
+cmdhub_emit() {
+    printf '\033]0;CMDHUB:%s\007' "$1"
+}
+
+cmdhub_debug_trap() {
+    if [ -n "${CMDHUB_IN_HOOK-}" ]; then
+        return
+    fi
+    case "$BASH_COMMAND" in
+        cmdhub_precmd*|cmdhub_debug_trap*|cmdhub_emit*|cmdhub_watch_fg*)
+            return
+            ;;
+    esac
+    cmdhub_watch_fg "$CMDHUB_SHELL_PID" "$CMDHUB_SHELL_PGID" 2>/dev/null &
+    disown 2>/dev/null || true
+}
+
+cmdhub_precmd() {
+    CMDHUB_IN_HOOK=1
+    local code="$?"
+    cmdhub_emit "state=exited;code=$code"
+    CMDHUB_IN_HOOK=
+}
+
+cmdhub_watch_fg() {
+    CMDHUB_IN_HOOK=1
+    local shell_pid="$1"
+    local shell_pgid="$2"
+    local tpgid
+    local i=0
+    while [ $i -lt 50 ]; do
+        tpgid="$(ps -o tpgid= -p "$shell_pid" 2>/dev/null | tr -d ' ')"
+        if [ -n "$tpgid" ] && [ "$tpgid" != "$shell_pgid" ] && [ "$tpgid" != "-" ]; then
+            cmdhub_emit "state=running;pid=$tpgid"
+            CMDHUB_IN_HOOK=
+            return
+        fi
+        sleep 0.02
+        i=$((i+1))
+    done
+    CMDHUB_IN_HOOK=
+}
+
+CMDHUB_SHELL_PID="$$"
+CMDHUB_SHELL_PGID="$(ps -o pgid= -p "$CMDHUB_SHELL_PID" 2>/dev/null | tr -d ' ')"
+
+if [ -f /etc/bash.bashrc ]; then
+    . /etc/bash.bashrc
+fi
+if [ -f "$HOME/.bashrc" ]; then
+    . "$HOME/.bashrc"
+fi
+
+if declare -p PROMPT_COMMAND 2>/dev/null | grep -q 'declare -a'; then
+    PROMPT_COMMAND=(cmdhub_precmd "${PROMPT_COMMAND[@]}")
+else
+    PROMPT_COMMAND="cmdhub_precmd${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+fi
+trap 'cmdhub_debug_trap' DEBUG
+
+if [ -n "${CMDHUB_INIT_CMD-}" ] && [ -z "${CMDHUB_INIT_DONE-}" ]; then
+    CMDHUB_INIT_DONE=1
+    eval "$CMDHUB_INIT_CMD"
+fi
+"#;
+    fs::write(&path, rc.trim_start())?;
+    let path_str = path.to_string_lossy().to_string();
+    let _ = RCFILE.set(path_str.clone());
+    Ok(path_str)
 }
