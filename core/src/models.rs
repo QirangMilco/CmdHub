@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Task {
@@ -162,4 +163,53 @@ impl UiConfig {
         
         codes.join(";")
     }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum InstanceStatus {
+    Running,
+    Exited { code: u32 },
+    Error { message: String },
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct InstanceInfo {
+    pub id: String,
+    pub task_id: String,
+    pub task_name: String,
+    pub status: InstanceStatus,
+    pub started_at: u64,
+    pub ended_at: Option<u64>,
+    pub child_pid: Option<u32>,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionStatus {
+    Pending,
+    Running,
+    Exited,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SessionInfo {
+    pub id: Uuid,
+    pub task_id: String,
+    pub task_name: String,
+    pub session_name: Option<String>,
+    pub command: String,
+    pub cwd: Option<PathBuf>,
+    pub env: Option<HashMap<String, String>>,
+    pub env_clear: bool,
+    pub status: SessionStatus,
+    pub started_at: u64,
+    pub ended_at: Option<u64>,
+    pub exit_code: Option<u32>,
+    pub runner_pid: Option<u32>,
+    pub child_pid: Option<u32>,
+    pub socket_path: Option<PathBuf>,
+    #[serde(default)]
+    pub running_task_pids: Vec<u32>,
 }

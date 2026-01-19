@@ -14,3 +14,4 @@ log.workspace = true
 portable-pty.workspace = true
 libc.workspace = true
 uuid.workspace = true
+tarpc.workspace = true

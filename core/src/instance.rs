@@ -1,4 +1,4 @@
-use crate::models::Task;
+use crate::models::{InstanceInfo, InstanceStatus, Task};
 use anyhow::{anyhow, Result};
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use std::collections::{HashMap, VecDeque};
@@ -7,25 +7,6 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InstanceStatus {
-    Running,
-    Exited(u32),
-    Error(String),
-}
-
-#[derive(Debug, Clone)]
-pub struct InstanceInfo {
-    pub id: String,
-    pub task_id: String,
-    pub task_name: String,
-    pub status: InstanceStatus,
-    pub started_at: u64,
-    pub ended_at: Option<u64>,
-    pub child_pid: Option<u32>,
-    pub title: Option<String>,
-}
 
 pub struct SpawnedInstance {
     pub info: InstanceInfo,
@@ -175,8 +156,8 @@ impl SessionManager {
                 let ended_at = now_epoch();
                 entry.info.ended_at = Some(ended_at);
                 entry.info.status = match status {
-                    Ok(exit) => InstanceStatus::Exited(exit.exit_code()),
-                    Err(err) => InstanceStatus::Error(err.to_string()),
+                    Ok(exit) => InstanceStatus::Exited { code: exit.exit_code() },
+                    Err(err) => InstanceStatus::Error { message: err.to_string() },
                 };
             }
         });
@@ -275,7 +256,7 @@ impl SessionManager {
     pub fn remove_if_exited(&self, id: &str) -> Result<bool> {
         let mut guard = self.instances.lock().map_err(|_| anyhow!("instance lock poisoned"))?;
         if let Some(entry) = guard.get(id) {
-            if matches!(entry.info.status, InstanceStatus::Exited(_)) {
+            if matches!(entry.info.status, InstanceStatus::Exited { .. }) {
                 guard.remove(id);
                 return Ok(true);
             }
@@ -411,7 +392,7 @@ fn apply_cmdhub_title(title: &str, info: &mut InstanceInfo) -> bool {
         }
         Some("exited") => {
             let exit_code = code.unwrap_or(0);
-            info.status = InstanceStatus::Exited(exit_code);
+            info.status = InstanceStatus::Exited { code: exit_code };
             info.ended_at = Some(now_epoch());
             true
         }

@@ -1,13 +1,11 @@
 use anyhow::{anyhow, Result};
 use cmdhub_core::config::load_config_auto;
-use cmdhub_core::instance::{InstanceInfo, InstanceStatus, SessionManager, SpawnedInstance};
-use cmdhub_core::models::{AppConfig, InputConfig, Task, UiConfig, KeyBindings};
-use cmdhub_core::template::render_command;
+use cmdhub_core::models::{AppConfig, InputConfig, InstanceInfo, InstanceStatus, KeyBindings, Task, UiConfig};
+use cmdhub_core::rpc::{attach_socket_path, rpc_socket_path, CmdHubServiceClient};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::cursor::{MoveTo, RestorePosition, SavePosition, Show};
-use portable_pty::PtySize;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -17,39 +15,39 @@ use ratatui::Terminal;
 use signal_hook::consts::{SIGINT, SIGQUIT, SIGTERM};
 use signal_hook::iterator::Signals;
 use std::collections::{HashMap, HashSet};
-use std::io::{self, Read, Write};
+use std::fs::{self, OpenOptions};
+use std::io::{self, BufRead, Read, Write};
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-const BUFFER_CAP: usize = 16 * 1024;
+use tarpc::client::Config as TarpcConfig;
+use tarpc::context;
+use tokio_serde::formats::Json;
 
 fn main() -> Result<()> {
     env_logger::init();
-    let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(async_main())
-}
-
-async fn async_main() -> Result<()> {
-    let config = load_config_auto().await?;
-    let manager = SessionManager::new(BUFFER_CAP);
-    setup_signal_handlers(manager.clone())?;
-    run_ui(config, manager)?;
+    let runtime = Arc::new(tokio::runtime::Runtime::new()?);
+    let config = runtime.block_on(load_config_auto())?;
+    let rpc = connect_or_launch(Arc::clone(&runtime))?;
+    run_ui(config, rpc)?;
     Ok(())
 }
 
-fn setup_signal_handlers(manager: SessionManager) -> Result<()> {
+fn setup_signal_handlers() -> Result<()> {
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT])?;
     thread::spawn(move || {
         for _ in signals.forever() {
-            let _ = manager.terminate_all(libc::SIGHUP);
             std::process::exit(1);
         }
     });
     Ok(())
 }
 
-fn run_ui(config: AppConfig, manager: SessionManager) -> Result<()> {
+fn run_ui(config: AppConfig, rpc: RpcHandle) -> Result<()> {
+    setup_signal_handlers()?;
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -57,7 +55,7 @@ fn run_ui(config: AppConfig, manager: SessionManager) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.hide_cursor()?;
 
-    let mut app = App::new(config, manager);
+    let mut app = App::new(config, rpc);
     let tick_rate = Duration::from_millis(200);
     let mut last_tick = Instant::now();
 
@@ -88,7 +86,7 @@ fn run_ui(config: AppConfig, manager: SessionManager) -> Result<()> {
         if let Some(next) = app.take_passthrough() {
             disable_raw_mode()?;
             execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-            let _outcome = run_passthrough(next, &app.manager)?;
+            let _outcome = run_passthrough(next)?;
             execute!(terminal.backend_mut(), EnterAlternateScreen)?;
             terminal.clear()?; // Force full redraw
             enable_raw_mode()?;
@@ -102,9 +100,112 @@ fn run_ui(config: AppConfig, manager: SessionManager) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone)]
+struct RpcHandle {
+    runtime: Arc<tokio::runtime::Runtime>,
+    client: Arc<CmdHubServiceClient>,
+}
+
+impl RpcHandle {
+    fn list_instances(&self) -> Result<Vec<InstanceInfo>> {
+        let result = self
+            .runtime
+            .block_on(self.client.list_instances(context::current()))
+            .map_err(|err| anyhow!("rpc transport: {}", err))?;
+        result.map_err(|err| anyhow!("rpc error: {}", err))
+    }
+
+    fn spawn(&self, task_id: String, params: HashMap<String, String>) -> Result<String> {
+        let result = self
+            .runtime
+            .block_on(self.client.spawn(context::current(), task_id, params))
+            .map_err(|err| anyhow!("rpc transport: {}", err))?;
+        result.map_err(|err| anyhow!("rpc error: {}", err))
+    }
+
+    fn stop(&self, instance_id: &str) -> Result<()> {
+        let result = self
+            .runtime
+            .block_on(self.client.stop(context::current(), instance_id.to_string()))
+            .map_err(|err| anyhow!("rpc transport: {}", err))?;
+        result.map_err(|err| anyhow!("rpc error: {}", err))
+    }
+
+    fn remove_if_exited(&self, instance_id: &str) -> Result<bool> {
+        let result = self
+            .runtime
+            .block_on(
+                self.client
+                    .remove_if_exited(context::current(), instance_id.to_string()),
+            )
+            .map_err(|err| anyhow!("rpc transport: {}", err))?;
+        result.map_err(|err| anyhow!("rpc error: {}", err))
+    }
+}
+
+fn connect_or_launch(runtime: Arc<tokio::runtime::Runtime>) -> Result<RpcHandle> {
+    let try_connect = |runtime: &Arc<tokio::runtime::Runtime>| -> Result<CmdHubServiceClient> {
+        runtime
+            .block_on(connect_client())
+            .map_err(|err| anyhow!("connect client: {}", err))
+    };
+
+    if let Ok(client) = try_connect(&runtime) {
+        return Ok(RpcHandle {
+            runtime,
+            client: Arc::new(client),
+        });
+    }
+
+    launch_server()?;
+    for _ in 0..15 {
+        thread::sleep(Duration::from_millis(200));
+        if let Ok(client) = try_connect(&runtime) {
+            return Ok(RpcHandle {
+                runtime,
+                client: Arc::new(client),
+            });
+        }
+    }
+
+    Err(anyhow!("failed to connect to cmdhub-server"))
+}
+
+async fn connect_client() -> Result<CmdHubServiceClient> {
+    let path = rpc_socket_path().ok_or_else(|| anyhow!("HOME not set"))?;
+    let transport =
+        tarpc::serde_transport::unix::connect(path, Json::default).await?;
+    Ok(CmdHubServiceClient::new(TarpcConfig::default(), transport).spawn())
+}
+
+fn launch_server() -> Result<()> {
+    let log_path = server_log_path()?;
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let file_err = file.try_clone()?;
+
+    Command::new("cmdhub-server")
+        .stdout(file)
+        .stderr(file_err)
+        .spawn()
+        .map_err(|err| anyhow!("spawn cmdhub-server: {}", err))?;
+
+    Ok(())
+}
+
+fn server_log_path() -> Result<PathBuf> {
+    let home = std::env::var("HOME").map_err(|_| anyhow!("HOME not set"))?;
+    Ok(PathBuf::from(home).join(".cmdhub").join("server.log"))
+}
+
 struct App {
     config: AppConfig,
-    manager: SessionManager,
+    rpc: RpcHandle,
     expanded: HashSet<String>,
     entries: Vec<Entry>,
     selected: usize,
@@ -143,7 +244,7 @@ struct InputField {
 }
 
 impl App {
-    fn new(config: AppConfig, manager: SessionManager) -> Self {
+    fn new(config: AppConfig, rpc: RpcHandle) -> Self {
         let expanded = config.tasks.iter().map(|task| task.id.clone()).collect();
         
         let mut key_bindings = KeyBindings::default();
@@ -161,7 +262,7 @@ impl App {
 
         Self {
             config,
-            manager,
+            rpc,
             expanded,
             entries: Vec::new(),
             selected: 0,
@@ -176,7 +277,7 @@ impl App {
     }
 
     fn refresh_instances(&mut self) {
-        if let Ok(instances) = self.manager.list_instances() {
+        if let Ok(instances) = self.rpc.list_instances() {
             self.instances = instances;
             self.rebuild_entries();
         }
@@ -390,7 +491,6 @@ impl App {
         };
 
         if check("quit", &key) {
-             let _ = self.manager.terminate_all(libc::SIGTERM);
              return Ok(true);
         } else if check("down", &key) {
              if self.selected + 1 < self.entries.len() {
@@ -410,11 +510,11 @@ impl App {
              }
         } else if check("delete_instance", &key) {
              if let Some(Entry::Instance { instance_id }) = self.entries.get(self.selected) {
-                 let _ = self.manager.remove_if_exited(instance_id);
+                 let _ = self.rpc.remove_if_exited(instance_id);
              }
         } else if check("kill_instance", &key) {
              if let Some(Entry::Instance { instance_id }) = self.entries.get(self.selected) {
-                 let _ = self.manager.kill_and_remove(instance_id);
+                 let _ = self.rpc.stop(instance_id);
              }
         } else if check("select", &key) {
              if let Some(entry) = self.entries.get(self.selected).cloned() {
@@ -518,18 +618,17 @@ impl App {
     }
 
     fn spawn_from_values(&mut self, task: Task, values: HashMap<String, String>) -> Result<()> {
-        let command = render_command(&task.command, &values, task.inputs.as_ref())
-            .map_err(|err| anyhow!("render command: {}", err))?;
-        let spawned = self.manager.spawn_raw(&task, &command)?;
-        self.attach_spawned(spawned)
-    }
-
-    fn attach_spawned(&mut self, spawned: SpawnedInstance) -> Result<()> {
+        let instance_id = self.rpc.spawn(task.id.clone(), values)?;
+        let info = self
+            .rpc
+            .list_instances()
+            .ok()
+            .and_then(|items| items.into_iter().find(|item| item.id == instance_id));
         self.next_passthrough = Some(PassthroughRequest {
-            instance_id: spawned.info.id.clone(),
-            task_name: spawned.info.task_name.clone(),
-            master: spawned.master,
-            writer: spawned.writer,
+            instance_id,
+            task_name: task.name.clone(),
+            instance_info: info,
+            rpc: self.rpc.clone(),
             ui_config: self.config.ui.clone().unwrap_or_default(),
             key_config: self.key_bindings.clone(),
         });
@@ -537,29 +636,17 @@ impl App {
     }
 
     fn attach_instance(&mut self, instance_id: &str) -> Result<()> {
-        let result = self.manager.take_master(instance_id)?;
-        if let Some((master, writer)) = result {
-            let task_name = self
-                .instances
-                .iter()
-                .find(|info| info.id == instance_id)
-                .map(|info| info.task_name.clone())
-                .unwrap_or_else(|| instance_id.to_string());
+        if let Some(info) = self.instances.iter().find(|info| info.id == instance_id).cloned() {
             self.next_passthrough = Some(PassthroughRequest {
                 instance_id: instance_id.to_string(),
-                task_name,
-                master,
-                writer,
+                task_name: info.task_name.clone(),
+                instance_info: Some(info),
+                rpc: self.rpc.clone(),
                 ui_config: self.config.ui.clone().unwrap_or_default(),
                 key_config: self.key_bindings.clone(),
             });
         } else {
-            let status = self.manager.get_status(instance_id).ok().flatten();
-            if status.is_none() {
-                self.last_error = Some("Instance not found".to_string());
-            } else {
-                self.last_error = Some("Instance is already attached".to_string());
-            }
+            self.last_error = Some("Instance not found".to_string());
         }
         Ok(())
     }
@@ -660,8 +747,8 @@ impl InputFormState {
 struct PassthroughRequest {
     instance_id: String,
     task_name: String,
-    master: Box<dyn portable_pty::MasterPty + Send>,
-    writer: Box<dyn std::io::Write + Send>,
+    instance_info: Option<InstanceInfo>,
+    rpc: RpcHandle,
     ui_config: UiConfig,
     key_config: KeyBindings,
 }
@@ -670,191 +757,168 @@ enum PassthroughOutcome {
     BackToList,
 }
 
-fn run_passthrough(mut request: PassthroughRequest, manager: &SessionManager) -> Result<PassthroughOutcome> {
-    let outcome = run_passthrough_inner(&mut request, manager);
-    // Always return the master to the session manager, even if inner failed
-    if let Err(e) = manager.return_master(&request.instance_id, request.master, request.writer) {
-        // If we can't return the master, it's likely the instance was removed or something severe happened.
-        // We log it but don't overwrite the original error if there was one.
-        eprintln!("Failed to return master: {}", e);
-    }
-    outcome
-}
-
-fn run_passthrough_inner(request: &mut PassthroughRequest, manager: &SessionManager) -> Result<PassthroughOutcome> {
+fn run_passthrough(request: PassthroughRequest) -> Result<PassthroughOutcome> {
     let mut stdout = io::stdout();
     enable_raw_mode()?;
 
+    let attach_path = attach_socket_path().ok_or_else(|| anyhow!("HOME not set"))?;
+    let mut stream = UnixStream::connect(attach_path)?;
+    stream.write_all(format!("{}\n", request.instance_id).as_bytes())?;
+    stream.flush()?;
+
+    let reader_stream = stream.try_clone()?;
+    reader_stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+    let mut reader = io::BufReader::new(reader_stream);
+    let mut response = String::new();
+    reader.read_line(&mut response)?;
+    if !response.trim_start().starts_with("OK") {
+        return Err(anyhow!("attach failed: {}", response.trim()));
+    }
+
     let size = crossterm::terminal::size()?;
     set_scroll_region(size.1)?;
-
     execute!(stdout, Clear(ClearType::All), MoveTo(0, 0), Show)?;
 
-    // Print Task Header
     let header = format!(
         "\r\n\x1b[1;36m=== CmdHub Task Session ===\x1b[0m\r\n\
          Task: \x1b[1m{}\x1b[0m (ID: {})\r\n\
          Started: {}\r\n\
          \x1b[1;36m===========================\x1b[0m\r\n\r\n",
-         request.task_name,
-         request.instance_id,
-         format_start_time(manager, &request.instance_id)
+        request.task_name,
+        request.instance_id,
+        format_start_time(request.instance_info.as_ref())
     );
+    let status_cache = Arc::new(Mutex::new(request.instance_info.clone()));
     stdout.write_all(header.as_bytes())?;
-    
-    // Draw initial status bar
-    draw_status_bar(&mut stdout, size.0, size.1, request, manager, false)?;
-    
-    // Move cursor back to top-left for output
-    // But we printed a header, so we shouldn't move to (0,0) blindly if we want to keep the header visible
-    // Wait, the buffer replay will just write from current cursor position?
-    // If we move to 0,0, we overwrite the header.
-    // We should NOT move to 0,0 after printing header.
-    // But we need to make sure we are not at the bottom (status bar).
-    // The header printing ends with newlines, so cursor is below header.
-    // Just ensure we are not overwriting status bar.
-    
-    // Remove: execute!(stdout, MoveTo(0, 0))?; 
-
-    let replay = manager.buffer_snapshot(&request.instance_id)?;
-    if !replay.is_empty() {
-        stdout.write_all(&replay)?;
-        stdout.flush()?;
-    }
-
-    // Use existing writer instead of taking it
-    // let mut writer = request.master.take_writer()?; 
-    #[cfg(unix)]
-    {
-        if let Some(fd) = request.master.as_raw_fd() {
-            // Make reads non-blocking so we can stop the reader thread on detach.
-            unsafe {
-                let flags = libc::fcntl(fd, libc::F_GETFL);
-                if flags != -1 {
-                    libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-                }
-            }
-        }
-    }
-
-    let mut reader = request.master.try_clone_reader()?;
+    draw_status_bar(&mut stdout, size.0, size.1, &request, &status_cache, false)?;
     let stop = Arc::new(Mutex::new(false));
-    let stop_reader = Arc::clone(&stop);
-    let manager_clone = manager.clone();
-    let instance_id = request.instance_id.clone();
 
-    let reader_handle = thread::spawn(move || {
-        let mut buf = [0u8; 8192];
-        let mut out = io::stdout();
-        loop {
-            let stopped = stop_reader.lock().map(|lock| *lock).unwrap_or(true);
-            if stopped {
-                break;
-            }
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let _ = out.write_all(&buf[..n]);
-                    let _ = out.flush();
-                    let _ = manager_clone.append_output(&instance_id, &buf[..n]);
+    let reader_stop = Arc::clone(&stop);
+    let reader_handle = {
+        let mut reader = reader;
+        thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            let mut out = io::stdout();
+            loop {
+                let stopped = reader_stop.lock().map(|lock| *lock).unwrap_or(true);
+                if stopped {
+                    break;
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    if stop_reader.lock().map(|lock| *lock).unwrap_or(true) {
-                        break;
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let _ = out.write_all(&buf[..n]);
+                        let _ = out.flush();
                     }
-                    thread::sleep(Duration::from_millis(10));
+                    Err(err)
+                        if err.kind() == io::ErrorKind::WouldBlock
+                            || err.kind() == io::ErrorKind::TimedOut =>
+                    {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
                 }
-                Err(_) => break,
             }
+        })
+    };
+
+    let status_stop = Arc::clone(&stop);
+    let status_cache_clone = Arc::clone(&status_cache);
+    let rpc = request.rpc.clone();
+    let instance_id = request.instance_id.clone();
+    thread::spawn(move || {
+        while !status_stop.lock().map(|lock| *lock).unwrap_or(true) {
+            if let Ok(list) = rpc.list_instances() {
+                if let Some(info) = list.into_iter().find(|info| info.id == instance_id) {
+                    if let Ok(mut guard) = status_cache_clone.lock() {
+                        *guard = Some(info);
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(500));
         }
     });
 
     let mut command_mode = false;
-    let mut last_status_running = true;
+    let mut last_status_update = Instant::now();
 
-    let exit = loop {
-        let is_running = matches!(manager.get_status(&request.instance_id), Ok(Some(InstanceStatus::Running)));
-        // status_label logic moved to draw_status_bar
-
-        if event::poll(Duration::from_millis(50))? {
-            match event::read()? {
-                Event::Key(key) => {
-                    let toggle_key = request.key_config.task_running.get("toggle_command_mode").map(|s| s.as_str()).unwrap_or("ctrl+p");
-                    
-                    if matches_key(&key, toggle_key) {
-                        if command_mode {
-                            command_mode = false;
-                        } else {
-                            command_mode = true;
-                        }
-                        // Redraw status bar immediately
-                        let size = crossterm::terminal::size()?;
-                        draw_status_bar(&mut stdout, size.0, size.1, request, manager, command_mode)?;
-                        continue;
-                    }
-
-                    if command_mode {
-                        let quit_key = request
-                            .key_config
-                            .task_running
-                            .get("quit_task")
-                            .map(|s| s.as_str())
-                            .unwrap_or("q");
-                        let back_key = request
-                            .key_config
-                            .task_running
-                            .get("back_to_list")
-                            .map(|s| s.as_str())
-                            .unwrap_or("b");
-                        let kill_key = request
-                            .key_config
-                            .task_running
-                            .get("kill_task")
-                            .map(|s| s.as_str())
-                            .unwrap_or("k");
-
-                        if matches_key(&key, quit_key) || matches_key(&key, back_key) {
-                            break PassthroughOutcome::BackToList;
-                        } else if matches_key(&key, kill_key) {
-                            let _ = manager.kill_and_remove(&request.instance_id);
-                            break PassthroughOutcome::BackToList;
-                        }
-                    } else if let Some(bytes) = key_event_to_bytes(&key) {
-                        let _ = request.writer.write_all(&bytes);
-                        let _ = request.writer.flush();
-                    }
-                    
+    loop {
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                let toggle_key = request
+                    .key_config
+                    .task_running
+                    .get("toggle_command_mode")
+                    .map(|s| s.as_str())
+                    .unwrap_or("ctrl+p");
+                if matches_key(&key, toggle_key) {
+                    command_mode = !command_mode;
                     let size = crossterm::terminal::size()?;
-                    draw_status_bar(&mut stdout, size.0, size.1, request, manager, command_mode)?;
+                    draw_status_bar(&mut stdout, size.0, size.1, &request, &status_cache, command_mode)?;
+                    continue;
                 }
-                Event::Resize(cols, rows) => {
-                    if is_running {
-                        let _ = request.master.resize(PtySize {
-                            rows,
-                            cols,
-                            pixel_width: 0,
-                            pixel_height: 0,
-                        });
+
+                if command_mode {
+                    let kill_key = request
+                        .key_config
+                        .task_running
+                        .get("kill_task")
+                        .map(|s| s.as_str())
+                        .unwrap_or("k");
+                    let back_key = request
+                        .key_config
+                        .task_running
+                        .get("back_to_list")
+                        .map(|s| s.as_str())
+                        .unwrap_or("b");
+                    let quit_key = request
+                        .key_config
+                        .task_running
+                        .get("quit_task")
+                        .map(|s| s.as_str())
+                        .unwrap_or("q");
+
+                    if matches_key(&key, back_key) || matches_key(&key, quit_key) {
+                        break;
+                    } else if matches_key(&key, kill_key) {
+                        let _ = request.rpc.stop(&request.instance_id);
+                        break;
                     }
-                    set_scroll_region(rows)?;
-                    draw_status_bar(&mut stdout, cols, rows, request, manager, command_mode)?;
+                } else if let Some(bytes) = key_event_to_bytes(&key) {
+                    let _ = stream.write_all(&bytes);
+                    let _ = stream.flush();
                 }
-                _ => {}
+            } else if let Event::Resize(cols, rows) = event::read()? {
+                set_scroll_region(rows)?;
+                draw_status_bar(&mut stdout, cols, rows, &request, &status_cache, command_mode)?;
             }
-        } else if last_status_running != is_running {
-             let size = crossterm::terminal::size()?;
-             draw_status_bar(&mut stdout, size.0, size.1, request, manager, command_mode)?;
         }
-        last_status_running = is_running;
-    };
+
+        if last_status_update.elapsed() > Duration::from_millis(500) {
+            last_status_update = Instant::now();
+            let size = crossterm::terminal::size()?;
+            draw_status_bar(&mut stdout, size.0, size.1, &request, &status_cache, command_mode)?;
+        }
+
+        let is_running = status_cache
+            .lock()
+            .ok()
+            .and_then(|info| info.as_ref().map(|i| matches!(i.status, InstanceStatus::Running)))
+            .unwrap_or(false);
+        if !is_running && !command_mode {
+            let size = crossterm::terminal::size()?;
+            draw_status_bar(&mut stdout, size.0, size.1, &request, &status_cache, command_mode)?;
+        }
+    }
 
     if let Ok(mut lock) = stop.lock() {
         *lock = true;
     }
+    let _ = stream.shutdown(std::net::Shutdown::Both);
     let _ = reader_handle.join();
     reset_scroll_region(&mut stdout)?;
     disable_raw_mode()?;
-    Ok(exit)
+    Ok(PassthroughOutcome::BackToList)
 }
 
 fn matches_key(event: &KeyEvent, binding: &str) -> bool {
@@ -935,8 +999,8 @@ fn key_event_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
 fn instance_line(info: &InstanceInfo) -> Line<'static> {
     let status = match &info.status {
         InstanceStatus::Running => ("Running".to_string(), Color::Green),
-        InstanceStatus::Exited(code) => (format!("Exited({})", code), Color::Gray),
-        InstanceStatus::Error(_) => ("Error".to_string(), Color::Red),
+        InstanceStatus::Exited { code } => (format!("Exited({})", code), Color::Gray),
+        InstanceStatus::Error { .. } => ("Error".to_string(), Color::Red),
     };
     let runtime = format_duration(info.started_at, info.ended_at);
     let pid = info
@@ -990,41 +1054,35 @@ fn reset_scroll_region(stdout: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
-fn format_start_time(manager: &SessionManager, instance_id: &str) -> String {
-    if let Ok(infos) = manager.list_instances() {
-        if let Some(info) = infos.iter().find(|i| i.id == instance_id) {
-            // Simple formatting since chrono is not in dependencies, just use raw timestamp or relative time if preferred
-            // But let's stick to format_duration logic for simplicity or just a simple string
-            return format!("{}s ago", format_duration(info.started_at, None));
-        }
+fn format_start_time(info: Option<&InstanceInfo>) -> String {
+    if let Some(info) = info {
+        return format!("{}s ago", format_duration(info.started_at, None));
     }
     "Unknown".to_string()
 }
 
-fn instance_status_details(manager: &SessionManager, instance_id: &str) -> (String, String, String, String) {
+fn instance_status_details(info: Option<&InstanceInfo>) -> (String, String, String, String) {
     let mut title = String::new();
     let mut pid = "-".to_string();
     let mut status_str = "Unknown".to_string();
     let mut status_color = "0"; // Default
 
-    if let Ok(infos) = manager.list_instances() {
-        if let Some(info) = infos.iter().find(|i| i.id == instance_id) {
-             title = info.title.clone().unwrap_or_default();
-             pid = info.child_pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string());
-             match &info.status {
-                InstanceStatus::Running => {
-                    status_str = "Running".to_string();
-                    status_color = "32"; // Green
-                }
-                InstanceStatus::Exited(code) => {
-                    status_str = format!("Exited({})", code);
-                    status_color = "90"; // Dark Gray
-                }
-                InstanceStatus::Error(_) => {
-                    status_str = "Error".to_string();
-                    status_color = "31"; // Red
-                }
-             }
+    if let Some(info) = info {
+        title = info.title.clone().unwrap_or_default();
+        pid = info.child_pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string());
+        match &info.status {
+            InstanceStatus::Running => {
+                status_str = "Running".to_string();
+                status_color = "32"; // Green
+            }
+            InstanceStatus::Exited { code } => {
+                status_str = format!("Exited({})", code);
+                status_color = "90"; // Dark Gray
+            }
+            InstanceStatus::Error { .. } => {
+                status_str = "Error".to_string();
+                status_color = "31"; // Red
+            }
         }
     }
     (title, pid, status_str, status_color.to_string())
@@ -1035,10 +1093,11 @@ fn draw_status_bar(
     cols: u16,
     rows: u16,
     request: &PassthroughRequest,
-    manager: &SessionManager,
+    status_cache: &Arc<Mutex<Option<InstanceInfo>>>,
     command_mode: bool,
 ) -> Result<()> {
-    let (title, pid, status, _status_color) = instance_status_details(manager, &request.instance_id);
+    let info = status_cache.lock().ok().and_then(|info| info.clone());
+    let (title, pid, status, _status_color) = instance_status_details(info.as_ref());
     
     // Construct the status line
     // Format: [TaskName] | ID | PID: 123 | Status: Running | Title: bash
