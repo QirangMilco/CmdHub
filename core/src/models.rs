@@ -31,9 +31,15 @@ pub enum InputConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppConfig {
     pub tasks: Vec<Task>,
+    pub server: Option<ServerListenConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ClientConfig {
     pub history_limit: Option<usize>,
     pub ui: Option<UiConfig>,
     pub keys: Option<KeyBindings>,
+    pub servers: Option<Vec<ServerConfig>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -54,13 +60,13 @@ impl Default for KeyBindings {
         task_list.insert("down".to_string(), "down".to_string());
         task_list.insert("select".to_string(), "enter".to_string());
         task_list.insert("delete_instance".to_string(), "d".to_string());
-        task_list.insert("kill_instance".to_string(), "X".to_string());
+        task_list.insert("kill_instance".to_string(), "k".to_string());
         task_list.insert("fold_task".to_string(), "tab".to_string());
 
         let mut task_running = HashMap::new();
         task_running.insert("toggle_command_mode".to_string(), "ctrl+p".to_string());
         task_running.insert("back_to_list".to_string(), "b".to_string()); // Detach
-        task_running.insert("quit_task".to_string(), "q".to_string()); // Actually detach/back, original code was 'q' -> back
+        task_running.insert("quit_client".to_string(), "q".to_string());
         task_running.insert("kill_task".to_string(), "k".to_string());
 
         Self {
@@ -77,6 +83,22 @@ pub struct UiConfig {
     pub status_bar_bg: Option<String>,
     pub command_mode_fg: Option<String>,
     pub command_mode_bg: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ServerConfig {
+    pub id: String,
+    pub name: Option<String>,
+    pub rpc: String,
+    pub attach: Option<String>,
+    pub auto_launch: Option<bool>,
+    pub is_default: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ServerListenConfig {
+    pub rpc_listen: Option<String>,
+    pub attach_listen: Option<String>,
 }
 
 impl Default for UiConfig {

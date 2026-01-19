@@ -1,8 +1,10 @@
 use anyhow::{anyhow, Result};
-use cmdhub_core::config::load_config_auto;
+use cmdhub_core::config::load_server_config_auto;
 use cmdhub_core::instance::{SessionManager, SpawnedInstance};
-use cmdhub_core::models::{AppConfig, InstanceInfo};
-use cmdhub_core::rpc::{attach_socket_path, rpc_socket_path, CmdHubService, RpcError};
+use cmdhub_core::models::{AppConfig, InstanceInfo, Task};
+use cmdhub_core::rpc::{
+    default_attach_uri, default_rpc_uri, parse_endpoint, CmdHubService, RpcEndpoint, RpcError,
+};
 use cmdhub_core::template::render_command;
 use futures::StreamExt;
 use portable_pty::MasterPty;
@@ -14,7 +16,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use tokio::net::UnixListener;
+use tokio::net::{TcpListener, UnixListener};
 use tarpc::context;
 use tarpc::server::{self, Channel};
 use tokio_serde::formats::Json;
@@ -40,6 +42,10 @@ struct InstanceIo {
 }
 
 impl CmdHubService for CmdHubServer {
+    async fn list_tasks(self, _: context::Context) -> Result<Vec<Task>, RpcError> {
+        Ok(self.state.config.tasks.clone())
+    }
+
     async fn list_instances(self, _: context::Context) -> Result<Vec<InstanceInfo>, RpcError> {
         self.state
             .manager
@@ -93,6 +99,16 @@ impl CmdHubService for CmdHubServer {
             .manager
             .remove_if_exited(&instance_id)
             .map_err(|err| RpcError::Internal(err.to_string()))
+    }
+
+    async fn shutdown(self, _: context::Context) -> Result<(), RpcError> {
+        let _ = self.state.manager.terminate_all(libc::SIGHUP);
+        remove_pid_file();
+        thread::spawn(|| {
+            thread::sleep(std::time::Duration::from_millis(100));
+            std::process::exit(0);
+        });
+        Ok(())
     }
 }
 
@@ -168,7 +184,8 @@ impl ServerState {
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
-    let config = load_config_auto().await?;
+    let config = load_server_config_auto().await?;
+    let server_cfg = config.server.clone();
     let manager = SessionManager::new(BUFFER_CAP);
     let state = Arc::new(ServerState {
         manager,
@@ -177,38 +194,96 @@ async fn main() -> Result<()> {
     });
 
     setup_signal_handlers(Arc::clone(&state))?;
+    write_pid_file()?;
+    let rpc_uri = server_cfg
+        .as_ref()
+        .and_then(|cfg| cfg.rpc_listen.clone())
+        .unwrap_or(default_rpc_uri()?);
+    let attach_uri = server_cfg
+        .as_ref()
+        .and_then(|cfg| cfg.attach_listen.clone())
+        .unwrap_or(default_attach_uri()?);
 
-    let rpc_path = rpc_socket_path().ok_or_else(|| anyhow!("HOME not set"))?;
-    let attach_path = attach_socket_path().ok_or_else(|| anyhow!("HOME not set"))?;
-    prepare_socket(&rpc_path)?;
-    prepare_socket(&attach_path)?;
-
-    let rpc_listener = tarpc::serde_transport::unix::listen(rpc_path, Json::default)
-        .await?;
-    let attach_listener = UnixListener::bind(attach_path)?;
+    let rpc_endpoint = parse_endpoint(&rpc_uri)?;
+    let attach_endpoint = parse_endpoint(&attach_uri)?;
 
     let attach_state = Arc::clone(&state);
-    tokio::spawn(async move {
-        let _ = run_attach_listener(attach_listener, attach_state).await;
-    });
+    match attach_endpoint {
+        RpcEndpoint::Unix(path) => {
+            prepare_socket(&path)?;
+            let listener = UnixListener::bind(path)?;
+            tokio::spawn(async move {
+                let _ = run_attach_listener_unix(listener, attach_state).await;
+            });
+        }
+        RpcEndpoint::Tcp(addr) => {
+            let listener = TcpListener::bind(addr).await?;
+            tokio::spawn(async move {
+                let _ = run_attach_listener_tcp(listener, attach_state).await;
+            });
+        }
+    }
 
-    let incoming = rpc_listener
-        .filter_map(|conn| async move { conn.ok() })
-        .map(server::BaseChannel::with_defaults);
-
-    incoming
-        .for_each(|channel| {
-            let server = CmdHubServer {
-                state: Arc::clone(&state),
-            };
-            async move {
-                let fut = channel.execute(server.serve()).for_each(spawn_task);
-                tokio::spawn(fut);
-            }
-        })
-        .await;
+    match rpc_endpoint {
+        RpcEndpoint::Unix(path) => {
+            prepare_socket(&path)?;
+            let rpc_listener = tarpc::serde_transport::unix::listen(path, Json::default).await?;
+            let incoming = rpc_listener
+                .filter_map(|conn| async move { conn.ok() })
+                .map(server::BaseChannel::with_defaults);
+            incoming
+                .for_each(|channel| {
+                    let server = CmdHubServer {
+                        state: Arc::clone(&state),
+                    };
+                    async move {
+                        let fut = channel.execute(server.serve()).for_each(spawn_task);
+                        tokio::spawn(fut);
+                    }
+                })
+                .await;
+        }
+        RpcEndpoint::Tcp(addr) => {
+            let rpc_listener = tarpc::serde_transport::tcp::listen(addr, Json::default).await?;
+            let incoming = rpc_listener
+                .filter_map(|conn| async move { conn.ok() })
+                .map(server::BaseChannel::with_defaults);
+            incoming
+                .for_each(|channel| {
+                    let server = CmdHubServer {
+                        state: Arc::clone(&state),
+                    };
+                    async move {
+                        let fut = channel.execute(server.serve()).for_each(spawn_task);
+                        tokio::spawn(fut);
+                    }
+                })
+                .await;
+        }
+    }
 
     Ok(())
+}
+
+fn pid_file_path() -> Result<PathBuf> {
+    let home = std::env::var("HOME").map_err(|_| anyhow!("HOME not set"))?;
+    Ok(PathBuf::from(home).join(".cmdhub").join("server.pid"))
+}
+
+fn write_pid_file() -> Result<()> {
+    let path = pid_file_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let pid = std::process::id();
+    fs::write(path, format!("{}\n", pid))?;
+    Ok(())
+}
+
+fn remove_pid_file() {
+    if let Ok(path) = pid_file_path() {
+        let _ = fs::remove_file(path);
+    }
 }
 
 async fn spawn_task(fut: impl std::future::Future<Output = ()> + Send + 'static) {
@@ -236,19 +311,89 @@ fn prepare_socket(path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn run_attach_listener(listener: UnixListener, state: Arc<ServerState>) -> Result<()> {
+async fn run_attach_listener_unix(listener: UnixListener, state: Arc<ServerState>) -> Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
         let std_stream = stream.into_std()?;
         std_stream.set_nonblocking(false)?;
         let state_clone = Arc::clone(&state);
         thread::spawn(move || {
-            let _ = handle_attach(std_stream, state_clone);
+            let _ = handle_attach_unix(std_stream, state_clone);
         });
     }
 }
 
-fn handle_attach(mut stream: std::os::unix::net::UnixStream, state: Arc<ServerState>) -> Result<()> {
+async fn run_attach_listener_tcp(listener: TcpListener, state: Arc<ServerState>) -> Result<()> {
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let std_stream = stream.into_std()?;
+        std_stream.set_nonblocking(false)?;
+        let state_clone = Arc::clone(&state);
+        thread::spawn(move || {
+            let _ = handle_attach_tcp(std_stream, state_clone);
+        });
+    }
+}
+
+fn handle_attach_unix(
+    mut stream: std::os::unix::net::UnixStream,
+    state: Arc<ServerState>,
+) -> Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut instance_id = String::new();
+    let bytes = reader.read_line(&mut instance_id)?;
+    if bytes == 0 {
+        return Ok(());
+    }
+    let instance_id = instance_id.trim().to_string();
+    let (writer, clients) = match state.get_instance_io(&instance_id) {
+        Some(io) => io,
+        None => {
+            let _ = stream.write_all(b"ERR instance not found\n");
+            return Ok(());
+        }
+    };
+
+    stream.write_all(b"OK\n")?;
+    let snapshot = state.manager.buffer_snapshot(&instance_id)?;
+    if !snapshot.is_empty() {
+        stream.write_all(&snapshot)?;
+    }
+
+    let (tx, rx) = mpsc::channel();
+    if let Ok(mut guard) = clients.lock() {
+        guard.push(tx);
+    }
+
+    let mut stream_out = stream.try_clone()?;
+    let forwarder = thread::spawn(move || {
+        for chunk in rx.iter() {
+            if stream_out.write_all(&chunk).is_err() {
+                break;
+            }
+            let _ = stream_out.flush();
+        }
+    });
+
+    let mut buf = [0u8; 4096];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if let Ok(mut guard) = writer.lock() {
+                    let _ = guard.write_all(&buf[..n]);
+                    let _ = guard.flush();
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    let _ = forwarder.join();
+    Ok(())
+}
+
+fn handle_attach_tcp(mut stream: std::net::TcpStream, state: Arc<ServerState>) -> Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut instance_id = String::new();
     let bytes = reader.read_line(&mut instance_id)?;

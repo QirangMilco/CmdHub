@@ -1,7 +1,12 @@
 use anyhow::{anyhow, Result};
-use cmdhub_core::config::load_config_auto;
-use cmdhub_core::models::{AppConfig, InputConfig, InstanceInfo, InstanceStatus, KeyBindings, Task, UiConfig};
-use cmdhub_core::rpc::{attach_socket_path, rpc_socket_path, CmdHubServiceClient};
+use cmdhub_core::config::load_client_config_auto;
+use cmdhub_core::models::{
+    ClientConfig, InputConfig, InstanceInfo, InstanceStatus, KeyBindings, ServerConfig, Task,
+    UiConfig,
+};
+use cmdhub_core::rpc::{
+    default_attach_uri, default_rpc_uri, parse_endpoint, CmdHubServiceClient, RpcEndpoint,
+};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
@@ -17,6 +22,7 @@ use signal_hook::iterator::Signals;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Read, Write};
+use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::Command;
@@ -29,10 +35,21 @@ use tokio_serde::formats::Json;
 
 fn main() -> Result<()> {
     env_logger::init();
+    let args: Vec<String> = std::env::args().collect();
+    let list_only = args.iter().any(|arg| arg == "--servers");
     let runtime = Arc::new(tokio::runtime::Runtime::new()?);
-    let config = runtime.block_on(load_config_auto())?;
-    let rpc = connect_or_launch(Arc::clone(&runtime))?;
-    run_ui(config, rpc)?;
+    let config = runtime.block_on(load_client_config_auto())?;
+    if list_only {
+        let servers = server_entries_from_config(&config)?;
+        let active_server = pick_default_server(&servers);
+        let servers = refresh_servers_statuses(Arc::clone(&runtime), servers);
+        print_servers(&servers, active_server);
+        return Ok(());
+    }
+
+    let (servers, active_server, rpc) = build_servers(Arc::clone(&runtime), &config)?;
+    let tasks = rpc.list_tasks().unwrap_or_default();
+    run_ui(config, tasks, servers, active_server, rpc)?;
     Ok(())
 }
 
@@ -46,7 +63,13 @@ fn setup_signal_handlers() -> Result<()> {
     Ok(())
 }
 
-fn run_ui(config: AppConfig, rpc: RpcHandle) -> Result<()> {
+fn run_ui(
+    config: ClientConfig,
+    tasks: Vec<Task>,
+    servers: Vec<ServerEntry>,
+    active_server: usize,
+    rpc: RpcHandle,
+) -> Result<()> {
     setup_signal_handlers()?;
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -55,12 +78,13 @@ fn run_ui(config: AppConfig, rpc: RpcHandle) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.hide_cursor()?;
 
-    let mut app = App::new(config, rpc);
+    let mut app = App::new(config, tasks, servers, active_server, rpc);
     let tick_rate = Duration::from_millis(200);
     let mut last_tick = Instant::now();
 
     loop {
         app.refresh_instances();
+        app.refresh_server_statuses();
         terminal.draw(|frame| app.draw(frame))?;
 
         let timeout = tick_rate
@@ -86,7 +110,10 @@ fn run_ui(config: AppConfig, rpc: RpcHandle) -> Result<()> {
         if let Some(next) = app.take_passthrough() {
             disable_raw_mode()?;
             execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-            let _outcome = run_passthrough(next)?;
+            let outcome = run_passthrough(next)?;
+            if matches!(outcome, PassthroughOutcome::QuitClient) {
+                return Ok(());
+            }
             execute!(terminal.backend_mut(), EnterAlternateScreen)?;
             terminal.clear()?; // Force full redraw
             enable_raw_mode()?;
@@ -100,82 +127,275 @@ fn run_ui(config: AppConfig, rpc: RpcHandle) -> Result<()> {
     Ok(())
 }
 
+fn print_servers(servers: &[ServerEntry], active_server: usize) {
+    println!("Servers:");
+    for (idx, server) in servers.iter().enumerate() {
+        let status = match server.status {
+            ServerStatus::Online => "online",
+            ServerStatus::Offline => "offline",
+            ServerStatus::Unknown => "unknown",
+        };
+        let active = if idx == active_server { "*" } else { " " };
+        println!("{} {} [{}] {}", active, server.name, status, server.rpc_addr);
+    }
+}
+
+fn resolve_server_status(
+    runtime: &Arc<tokio::runtime::Runtime>,
+    server: &ServerEntry,
+) -> ServerStatus {
+    if server.is_local {
+        if let Ok(pid) = read_local_server_pid() {
+            if is_process_alive(pid) {
+                return ServerStatus::Online;
+            }
+        }
+    }
+    match check_server_status(runtime, &server.rpc_addr) {
+        Ok(true) => ServerStatus::Online,
+        Ok(false) => ServerStatus::Offline,
+        Err(_) => ServerStatus::Offline,
+    }
+}
+
+fn refresh_servers_statuses(
+    runtime: Arc<tokio::runtime::Runtime>,
+    mut servers: Vec<ServerEntry>,
+) -> Vec<ServerEntry> {
+    for server in servers.iter_mut() {
+        server.status = resolve_server_status(&runtime, server);
+    }
+    servers
+}
+
 #[derive(Clone)]
 struct RpcHandle {
     runtime: Arc<tokio::runtime::Runtime>,
-    client: Arc<CmdHubServiceClient>,
+    client: Option<Arc<CmdHubServiceClient>>,
 }
 
 impl RpcHandle {
-    fn list_instances(&self) -> Result<Vec<InstanceInfo>> {
+    fn list_tasks(&self) -> Result<Vec<Task>> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow!("server offline"))?;
         let result = self
             .runtime
-            .block_on(self.client.list_instances(context::current()))
+            .block_on(client.list_tasks(context::current()))
+            .map_err(|err| anyhow!("rpc transport: {}", err))?;
+        result.map_err(|err| anyhow!("rpc error: {}", err))
+    }
+
+    fn list_instances(&self) -> Result<Vec<InstanceInfo>> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow!("server offline"))?;
+        let result = self
+            .runtime
+            .block_on(client.list_instances(context::current()))
             .map_err(|err| anyhow!("rpc transport: {}", err))?;
         result.map_err(|err| anyhow!("rpc error: {}", err))
     }
 
     fn spawn(&self, task_id: String, params: HashMap<String, String>) -> Result<String> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow!("server offline"))?;
         let result = self
             .runtime
-            .block_on(self.client.spawn(context::current(), task_id, params))
+            .block_on(client.spawn(context::current(), task_id, params))
             .map_err(|err| anyhow!("rpc transport: {}", err))?;
         result.map_err(|err| anyhow!("rpc error: {}", err))
     }
 
     fn stop(&self, instance_id: &str) -> Result<()> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow!("server offline"))?;
         let result = self
             .runtime
-            .block_on(self.client.stop(context::current(), instance_id.to_string()))
+            .block_on(client.stop(context::current(), instance_id.to_string()))
             .map_err(|err| anyhow!("rpc transport: {}", err))?;
         result.map_err(|err| anyhow!("rpc error: {}", err))
     }
 
     fn remove_if_exited(&self, instance_id: &str) -> Result<bool> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow!("server offline"))?;
         let result = self
             .runtime
             .block_on(
-                self.client
+                client
                     .remove_if_exited(context::current(), instance_id.to_string()),
             )
             .map_err(|err| anyhow!("rpc transport: {}", err))?;
         result.map_err(|err| anyhow!("rpc error: {}", err))
     }
+
+    fn shutdown(&self) -> Result<()> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow!("server offline"))?;
+        let result = self
+            .runtime
+            .block_on(client.shutdown(context::current()))
+            .map_err(|err| anyhow!("rpc transport: {}", err))?;
+        result.map_err(|err| anyhow!("rpc error: {}", err))
+    }
+
+    fn offline(runtime: Arc<tokio::runtime::Runtime>) -> Self {
+        Self {
+            runtime,
+            client: None,
+        }
+    }
 }
 
-fn connect_or_launch(runtime: Arc<tokio::runtime::Runtime>) -> Result<RpcHandle> {
-    let try_connect = |runtime: &Arc<tokio::runtime::Runtime>| -> Result<CmdHubServiceClient> {
+fn build_servers(
+    runtime: Arc<tokio::runtime::Runtime>,
+    config: &ClientConfig,
+) -> Result<(Vec<ServerEntry>, usize, RpcHandle)> {
+    let mut servers = server_entries_from_config(config)?;
+
+    let active_server = pick_default_server(&servers);
+    let (rpc, status) = match connect_to_server(Arc::clone(&runtime), &servers[active_server]) {
+        Ok(handle) => (handle, ServerStatus::Online),
+        Err(_) => {
+            if servers[active_server].is_local {
+                (RpcHandle::offline(Arc::clone(&runtime)), ServerStatus::Offline)
+            } else {
+                (RpcHandle::offline(Arc::clone(&runtime)), ServerStatus::Offline)
+            }
+        }
+    };
+
+    if let Some(server) = servers.get_mut(active_server) {
+        server.status = status;
+    }
+
+    Ok((servers, active_server, rpc))
+}
+
+fn server_entries_from_config(config: &ClientConfig) -> Result<Vec<ServerEntry>> {
+    let mut servers = if let Some(configured) = config.servers.as_ref() {
+        configured
+            .iter()
+            .map(server_entry_from_config)
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
+    if servers.is_empty() {
+        servers.push(default_server_entry()?);
+    }
+    Ok(servers)
+}
+
+fn pick_default_server(servers: &[ServerEntry]) -> usize {
+    servers
+        .iter()
+        .position(|server| server.is_default)
+        .or_else(|| servers.iter().position(|server| server.auto_launch))
+        .unwrap_or(0)
+}
+
+fn default_server_entry() -> Result<ServerEntry> {
+    Ok(ServerEntry {
+        id: "local".to_string(),
+        name: "Local".to_string(),
+        rpc_addr: default_rpc_uri()?,
+        attach_addr: Some(default_attach_uri()?),
+        auto_launch: true,
+        is_default: true,
+        is_local: true,
+        status: ServerStatus::Unknown,
+    })
+}
+
+fn server_entry_from_config(config: &ServerConfig) -> Result<ServerEntry> {
+    let name = config.name.clone().unwrap_or_else(|| config.id.clone());
+    let mut is_local = config.id == "local";
+    if !is_local {
+        if let Ok(default_rpc) = default_rpc_uri() {
+            is_local = config.rpc == default_rpc;
+        }
+    }
+    Ok(ServerEntry {
+        id: config.id.clone(),
+        name,
+        rpc_addr: config.rpc.clone(),
+        attach_addr: config.attach.clone(),
+        auto_launch: config.auto_launch.unwrap_or(false),
+        is_default: config.is_default.unwrap_or(false),
+        is_local,
+        status: ServerStatus::Unknown,
+    })
+}
+
+fn connect_to_server(
+    runtime: Arc<tokio::runtime::Runtime>,
+    server: &ServerEntry,
+) -> Result<RpcHandle> {
+    let try_connect = |runtime: &Arc<tokio::runtime::Runtime>,
+                       addr: &str|
+     -> Result<CmdHubServiceClient> {
         runtime
-            .block_on(connect_client())
+            .block_on(connect_client(addr))
             .map_err(|err| anyhow!("connect client: {}", err))
     };
 
-    if let Ok(client) = try_connect(&runtime) {
+    if let Ok(client) = try_connect(&runtime, &server.rpc_addr) {
         return Ok(RpcHandle {
             runtime,
-            client: Arc::new(client),
+            client: Some(Arc::new(client)),
         });
     }
 
-    launch_server()?;
-    for _ in 0..15 {
-        thread::sleep(Duration::from_millis(200));
-        if let Ok(client) = try_connect(&runtime) {
-            return Ok(RpcHandle {
-                runtime,
-                client: Arc::new(client),
-            });
+    if server.auto_launch && server.is_local {
+        launch_server()?;
+        for _ in 0..15 {
+            thread::sleep(Duration::from_millis(200));
+            if let Ok(client) = try_connect(&runtime, &server.rpc_addr) {
+                return Ok(RpcHandle {
+                    runtime,
+                    client: Some(Arc::new(client)),
+                });
+            }
         }
     }
 
-    Err(anyhow!("failed to connect to cmdhub-server"))
+    Err(anyhow!("failed to connect to {}", server.rpc_addr))
 }
 
-async fn connect_client() -> Result<CmdHubServiceClient> {
-    let path = rpc_socket_path().ok_or_else(|| anyhow!("HOME not set"))?;
-    let transport =
-        tarpc::serde_transport::unix::connect(path, Json::default).await?;
-    Ok(CmdHubServiceClient::new(TarpcConfig::default(), transport).spawn())
+async fn connect_client(addr: &str) -> Result<CmdHubServiceClient> {
+    match parse_endpoint(addr)? {
+        RpcEndpoint::Unix(path) => {
+            let transport = tarpc::serde_transport::unix::connect(path, Json::default).await?;
+            Ok(CmdHubServiceClient::new(TarpcConfig::default(), transport).spawn())
+        }
+        RpcEndpoint::Tcp(host) => {
+            let transport = tarpc::serde_transport::tcp::connect(host, Json::default).await?;
+            Ok(CmdHubServiceClient::new(TarpcConfig::default(), transport).spawn())
+        }
+    }
+}
+
+fn check_server_status(runtime: &Arc<tokio::runtime::Runtime>, addr: &str) -> Result<bool> {
+    let client = runtime
+        .block_on(connect_client(addr))
+        .map_err(|err| anyhow!("connect client: {}", err))?;
+    let handle = RpcHandle {
+        runtime: Arc::clone(runtime),
+        client: Some(Arc::new(client)),
+    };
+    Ok(handle.list_instances().is_ok())
 }
 
 fn launch_server() -> Result<()> {
@@ -189,12 +409,81 @@ fn launch_server() -> Result<()> {
         .open(&log_path)?;
     let file_err = file.try_clone()?;
 
-    Command::new("cmdhub-server")
-        .stdout(file)
-        .stderr(file_err)
-        .spawn()
-        .map_err(|err| anyhow!("spawn cmdhub-server: {}", err))?;
+    let mut tried = Vec::new();
+    let mut last_err: Option<anyhow::Error> = None;
+    for candidate in server_command_candidates() {
+        let result = Command::new(&candidate)
+            .stdout(file.try_clone()?)
+            .stderr(file_err.try_clone()?)
+            .spawn()
+            .map_err(|err| anyhow!("spawn {}: {}", candidate.display(), err));
+        match result {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                tried.push(candidate);
+                last_err = Some(err);
+            }
+        }
+    }
 
+    Err(last_err.unwrap_or_else(|| anyhow!("spawn cmdhub-server failed")))
+        .map_err(|err| {
+            let list = tried
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow!("{}; tried: {}", err, list)
+        })?;
+
+    Ok(())
+}
+
+fn server_command_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    candidates.push(PathBuf::from("cmdhub-server"));
+    if let Ok(current) = std::env::current_exe() {
+        if let Some(dir) = current.parent() {
+            candidates.push(dir.join("cmdhub-server"));
+        }
+    }
+    candidates
+}
+
+fn read_local_server_pid() -> Result<i32> {
+    let path = server_pid_path()?;
+    let content = fs::read_to_string(path)?;
+    let pid = content.trim().parse::<i32>()?;
+    Ok(pid)
+}
+
+fn is_process_alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+fn stop_local_server_via_pid() -> Result<()> {
+    let pid = read_local_server_pid()?;
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
+    for _ in 0..10 {
+        if !is_process_alive(pid) {
+            if let Ok(path) = server_pid_path() {
+                let _ = fs::remove_file(path);
+            }
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+    if is_process_alive(pid) {
+        return Err(anyhow!("failed to stop local server (pid {})", pid));
+    }
+    if let Ok(path) = server_pid_path() {
+        let _ = fs::remove_file(path);
+    }
     Ok(())
 }
 
@@ -203,9 +492,37 @@ fn server_log_path() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".cmdhub").join("server.log"))
 }
 
+fn server_pid_path() -> Result<PathBuf> {
+    let home = std::env::var("HOME").map_err(|_| anyhow!("HOME not set"))?;
+    Ok(PathBuf::from(home).join(".cmdhub").join("server.pid"))
+}
+
+#[derive(Clone)]
+struct ServerEntry {
+    #[allow(dead_code)]
+    id: String,
+    name: String,
+    rpc_addr: String,
+    attach_addr: Option<String>,
+    auto_launch: bool,
+    is_default: bool,
+    is_local: bool,
+    status: ServerStatus,
+}
+
+#[derive(Clone, Copy)]
+enum ServerStatus {
+    Unknown,
+    Online,
+    Offline,
+}
+
 struct App {
-    config: AppConfig,
+    config: ClientConfig,
+    tasks: Vec<Task>,
     rpc: RpcHandle,
+    servers: Vec<ServerEntry>,
+    active_server: usize,
     expanded: HashSet<String>,
     entries: Vec<Entry>,
     selected: usize,
@@ -216,6 +533,7 @@ struct App {
     needs_redraw: bool,
     next_passthrough: Option<PassthroughRequest>,
     key_bindings: KeyBindings,
+    last_server_check: Instant,
 }
 
 enum AppMode {
@@ -244,8 +562,14 @@ struct InputField {
 }
 
 impl App {
-    fn new(config: AppConfig, rpc: RpcHandle) -> Self {
-        let expanded = config.tasks.iter().map(|task| task.id.clone()).collect();
+    fn new(
+        config: ClientConfig,
+        tasks: Vec<Task>,
+        servers: Vec<ServerEntry>,
+        active_server: usize,
+        rpc: RpcHandle,
+    ) -> Self {
+        let expanded = tasks.iter().map(|task| task.id.clone()).collect();
         
         let mut key_bindings = KeyBindings::default();
         if let Some(user_keys) = &config.keys {
@@ -262,7 +586,10 @@ impl App {
 
         Self {
             config,
+            tasks,
             rpc,
+            servers,
+            active_server,
             expanded,
             entries: Vec::new(),
             selected: 0,
@@ -273,25 +600,66 @@ impl App {
             needs_redraw: true,
             next_passthrough: None,
             key_bindings,
+            last_server_check: Instant::now(),
         }
     }
 
     fn refresh_instances(&mut self) {
-        if let Ok(instances) = self.rpc.list_instances() {
-            self.instances = instances;
-            self.rebuild_entries();
+        match self.rpc.list_instances() {
+            Ok(instances) => {
+                self.instances = instances;
+                if let Some(server) = self.servers.get_mut(self.active_server) {
+                    server.status = ServerStatus::Online;
+                }
+                if self.tasks.is_empty() {
+                    if let Ok(tasks) = self.rpc.list_tasks() {
+                        self.tasks = tasks;
+                        self.expanded = self.tasks.iter().map(|task| task.id.clone()).collect();
+                    }
+                }
+            }
+            Err(_) => {
+                self.instances.clear();
+                self.tasks.clear();
+                self.expanded.clear();
+                if let Some(server) = self.servers.get_mut(self.active_server) {
+                    server.status = ServerStatus::Offline;
+                }
+            }
+        }
+        self.rebuild_entries();
+    }
+
+    fn refresh_server_statuses(&mut self) {
+        if self.last_server_check.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.last_server_check = Instant::now();
+        for (idx, server) in self.servers.iter_mut().enumerate() {
+            if idx == self.active_server {
+                continue;
+            }
+            server.status = resolve_server_status(&self.rpc.runtime, server);
         }
     }
 
     fn rebuild_entries(&mut self) {
         let mut entries = Vec::new();
+        if !self.servers.is_empty() {
+            entries.push(Entry::ServerCategory {
+                name: "Servers".to_string(),
+            });
+            for idx in 0..self.servers.len() {
+                entries.push(Entry::Server { index: idx });
+            }
+        }
         let mut by_task: HashMap<String, Vec<InstanceInfo>> = HashMap::new();
         for instance in &self.instances {
             by_task.entry(instance.task_id.clone()).or_default().push(instance.clone());
         }
 
         let mut by_category: HashMap<String, Vec<&Task>> = HashMap::new();
-        for task in &self.config.tasks {
+        for task in &self.tasks {
             let category = task.category.clone().unwrap_or_else(|| "Default".to_string());
             by_category.entry(category).or_default().push(task);
         }
@@ -361,6 +729,17 @@ impl App {
         let mut items = Vec::new();
         for entry in &self.entries {
             match entry {
+                Entry::ServerCategory { name } => {
+                    let line = Line::from(vec![Span::styled(
+                        name.clone(),
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    )]);
+                    items.push(ListItem::new(line));
+                }
+                Entry::Server { index } => {
+                    let line = self.server_line(*index);
+                    items.push(ListItem::new(line));
+                }
                 Entry::Category { name } => {
                     let line = Line::from(vec![Span::styled(
                         name.clone(),
@@ -394,11 +773,42 @@ impl App {
         items
     }
 
+    fn server_line(&self, index: usize) -> Line<'static> {
+        let server = match self.servers.get(index) {
+            Some(server) => server,
+            None => return Line::from(vec![Span::raw("  (missing server)")]),
+        };
+        let status_label = match server.status {
+            ServerStatus::Online => "online",
+            ServerStatus::Offline => "offline",
+            ServerStatus::Unknown => "unknown",
+        };
+        let status_color = match server.status {
+            ServerStatus::Online => Color::Green,
+            ServerStatus::Offline => Color::Red,
+            ServerStatus::Unknown => Color::Gray,
+        };
+        let active_marker = if index == self.active_server { "*" } else { " " };
+        Line::from(vec![
+            Span::styled(
+                format!("{} {}", active_marker, server.name),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("[{}]", status_label),
+                Style::default().fg(status_color),
+            ),
+        ])
+    }
+
     fn build_help(&self) -> Paragraph<'_> {
         let mut text = Vec::new();
         match self.mode {
             AppMode::List => {
-                text.push(Line::from("Enter: run/attach  Tab: fold  d: delete  X: kill  Q: quit"));
+                text.push(Line::from(
+                    "Enter: run/attach/switch  Tab: fold  d: delete  k: kill  Q: quit",
+                ));
             }
             AppMode::InputForm(_) => {
                 text.push(Line::from("Enter: next/submit  Esc: cancel  Up/Down: select  Left/Right: option"));
@@ -519,6 +929,19 @@ impl App {
         } else if check("select", &key) {
              if let Some(entry) = self.entries.get(self.selected).cloned() {
                  match entry {
+                     Entry::ServerCategory { .. } => {}
+                     Entry::Server { index } => {
+                         if self
+                             .servers
+                             .get(index)
+                             .map(|server| server.is_local)
+                             .unwrap_or(false)
+                         {
+                             self.toggle_local_server(index)?;
+                         } else {
+                             self.switch_server(index)?;
+                         }
+                     }
                      Entry::Category { .. } => {}
                      Entry::Task { task_id } => {
                          let task = self.task_by_id(&task_id).cloned();
@@ -582,7 +1005,7 @@ impl App {
                 } else {
                     let task_index = form.task_index;
                     let values = form.collect_values();
-                    let task = self.config.tasks.get(task_index).cloned();
+                    let task = self.tasks.get(task_index).cloned();
                     if let Some(task) = task {
                         self.spawn_from_values(task, values)?;
                     }
@@ -602,7 +1025,6 @@ impl App {
             }
             let state = InputFormState {
                 task_index: self
-                    .config
                     .tasks
                     .iter()
                     .position(|t| t.id == task.id)
@@ -629,6 +1051,10 @@ impl App {
             task_name: task.name.clone(),
             instance_info: info,
             rpc: self.rpc.clone(),
+            attach_addr: self
+                .servers
+                .get(self.active_server)
+                .and_then(|server| server.attach_addr.clone()),
             ui_config: self.config.ui.clone().unwrap_or_default(),
             key_config: self.key_bindings.clone(),
         });
@@ -642,6 +1068,10 @@ impl App {
                 task_name: info.task_name.clone(),
                 instance_info: Some(info),
                 rpc: self.rpc.clone(),
+                attach_addr: self
+                    .servers
+                    .get(self.active_server)
+                    .and_then(|server| server.attach_addr.clone()),
                 ui_config: self.config.ui.clone().unwrap_or_default(),
                 key_config: self.key_bindings.clone(),
             });
@@ -656,12 +1086,119 @@ impl App {
     }
 
     fn task_by_id(&self, task_id: &str) -> Option<&Task> {
-        self.config.tasks.iter().find(|task| task.id == task_id)
+        self.tasks.iter().find(|task| task.id == task_id)
+    }
+
+    fn switch_server(&mut self, index: usize) -> Result<()> {
+        if index >= self.servers.len() {
+            return Ok(());
+        }
+        if index == self.active_server {
+            return Ok(());
+        }
+        let server = self.servers[index].clone();
+        match connect_to_server(Arc::clone(&self.rpc.runtime), &server) {
+            Ok(rpc) => {
+                let tasks = rpc.list_tasks().unwrap_or_default();
+                self.tasks = tasks;
+                self.expanded = self.tasks.iter().map(|task| task.id.clone()).collect();
+                self.rpc = rpc;
+                self.active_server = index;
+                if let Some(server) = self.servers.get_mut(index) {
+                    server.status = ServerStatus::Online;
+                }
+                self.refresh_instances();
+            }
+            Err(err) => {
+                if let Some(server) = self.servers.get_mut(index) {
+                    server.status = ServerStatus::Offline;
+                }
+                self.tasks.clear();
+                self.expanded.clear();
+                self.instances.clear();
+                self.last_error = Some(format!("Server connect failed: {}", err));
+            }
+        }
+        Ok(())
+    }
+
+    fn toggle_local_server(&mut self, index: usize) -> Result<()> {
+        if index >= self.servers.len() {
+            return Ok(());
+        }
+        let server = self.servers[index].clone();
+        if !server.is_local {
+            self.last_error = Some("Only local server can be managed".to_string());
+            return Ok(());
+        }
+        match server.status {
+            ServerStatus::Online => {
+                let rpc_result = if self.active_server == index {
+                    self.rpc.shutdown()
+                } else {
+                    connect_to_server(Arc::clone(&self.rpc.runtime), &server)
+                        .and_then(|rpc| rpc.shutdown())
+                };
+                let pid_result = stop_local_server_via_pid();
+                if check_server_status(&self.rpc.runtime, &server.rpc_addr).unwrap_or(false) {
+                    if let Some(entry) = self.servers.get_mut(index) {
+                        entry.status = ServerStatus::Online;
+                    }
+                    self.last_error = Some(format!(
+                        "Server is still online (rpc={}, pid={})",
+                        rpc_result
+                            .err()
+                            .map(|err| err.to_string())
+                            .unwrap_or_else(|| "ok".to_string()),
+                        pid_result
+                            .err()
+                            .map(|err| err.to_string())
+                            .unwrap_or_else(|| "ok".to_string())
+                    ));
+                    return Ok(());
+                }
+                if let Some(entry) = self.servers.get_mut(index) {
+                    entry.status = ServerStatus::Offline;
+                }
+                if self.active_server == index {
+                    self.rpc = RpcHandle::offline(Arc::clone(&self.rpc.runtime));
+                    self.tasks.clear();
+                    self.expanded.clear();
+                    self.instances.clear();
+                }
+            }
+            ServerStatus::Offline | ServerStatus::Unknown => {
+                if let Err(err) = launch_server() {
+                    self.last_error = Some(format!("Server start failed: {}", err));
+                    return Ok(());
+                }
+                thread::sleep(Duration::from_millis(200));
+                match connect_to_server(Arc::clone(&self.rpc.runtime), &server) {
+                    Ok(rpc) => {
+                        let tasks = rpc.list_tasks().unwrap_or_default();
+                        self.tasks = tasks;
+                        self.expanded = self.tasks.iter().map(|task| task.id.clone()).collect();
+                        self.rpc = rpc;
+                        self.active_server = index;
+                        if let Some(entry) = self.servers.get_mut(index) {
+                            entry.status = ServerStatus::Online;
+                        }
+                        self.refresh_instances();
+                    }
+                    Err(err) => {
+                        self.last_error = Some(format!("Server connect failed: {}", err));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
 #[derive(Clone)]
 enum Entry {
+    ServerCategory { name: String },
+    Server { index: usize },
     Category { name: String },
     Task { task_id: String },
     Instance { instance_id: String },
@@ -749,20 +1286,85 @@ struct PassthroughRequest {
     task_name: String,
     instance_info: Option<InstanceInfo>,
     rpc: RpcHandle,
+    attach_addr: Option<String>,
     ui_config: UiConfig,
     key_config: KeyBindings,
 }
 
 enum PassthroughOutcome {
     BackToList,
+    QuitClient,
+}
+
+enum AttachStream {
+    Unix(UnixStream),
+    Tcp(TcpStream),
+}
+
+impl AttachStream {
+    fn connect(addr: &str) -> Result<Self> {
+        match parse_endpoint(addr)? {
+            RpcEndpoint::Unix(path) => Ok(Self::Unix(UnixStream::connect(path)?)),
+            RpcEndpoint::Tcp(host) => Ok(Self::Tcp(TcpStream::connect(host)?)),
+        }
+    }
+
+    fn try_clone(&self) -> io::Result<Self> {
+        match self {
+            AttachStream::Unix(stream) => Ok(AttachStream::Unix(stream.try_clone()?)),
+            AttachStream::Tcp(stream) => Ok(AttachStream::Tcp(stream.try_clone()?)),
+        }
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        match self {
+            AttachStream::Unix(stream) => stream.set_read_timeout(timeout),
+            AttachStream::Tcp(stream) => stream.set_read_timeout(timeout),
+        }
+    }
+
+    fn shutdown(&self, how: std::net::Shutdown) -> io::Result<()> {
+        match self {
+            AttachStream::Unix(stream) => stream.shutdown(how),
+            AttachStream::Tcp(stream) => stream.shutdown(how),
+        }
+    }
+}
+
+impl Read for AttachStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            AttachStream::Unix(stream) => stream.read(buf),
+            AttachStream::Tcp(stream) => stream.read(buf),
+        }
+    }
+}
+
+impl Write for AttachStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            AttachStream::Unix(stream) => stream.write(buf),
+            AttachStream::Tcp(stream) => stream.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            AttachStream::Unix(stream) => stream.flush(),
+            AttachStream::Tcp(stream) => stream.flush(),
+        }
+    }
 }
 
 fn run_passthrough(request: PassthroughRequest) -> Result<PassthroughOutcome> {
     let mut stdout = io::stdout();
     enable_raw_mode()?;
 
-    let attach_path = attach_socket_path().ok_or_else(|| anyhow!("HOME not set"))?;
-    let mut stream = UnixStream::connect(attach_path)?;
+    let attach_addr = request
+        .attach_addr
+        .as_ref()
+        .ok_or_else(|| anyhow!("attach endpoint not configured for server"))?;
+    let mut stream = AttachStream::connect(attach_addr)?;
     stream.write_all(format!("{}\n", request.instance_id).as_bytes())?;
     stream.flush()?;
 
@@ -842,6 +1444,7 @@ fn run_passthrough(request: PassthroughRequest) -> Result<PassthroughOutcome> {
     let mut command_mode = false;
     let mut last_status_update = Instant::now();
 
+    let mut outcome = PassthroughOutcome::BackToList;
     loop {
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
@@ -874,11 +1477,21 @@ fn run_passthrough(request: PassthroughRequest) -> Result<PassthroughOutcome> {
                     let quit_key = request
                         .key_config
                         .task_running
-                        .get("quit_task")
+                        .get("quit_client")
                         .map(|s| s.as_str())
                         .unwrap_or("q");
+                    let legacy_quit_task = request
+                        .key_config
+                        .task_running
+                        .get("quit_task")
+                        .map(|s| s.as_str());
 
-                    if matches_key(&key, back_key) || matches_key(&key, quit_key) {
+                    if matches_key(&key, back_key)
+                        || legacy_quit_task.map(|value| matches_key(&key, value)).unwrap_or(false)
+                    {
+                        break;
+                    } else if matches_key(&key, quit_key) {
+                        outcome = PassthroughOutcome::QuitClient;
                         break;
                     } else if matches_key(&key, kill_key) {
                         let _ = request.rpc.stop(&request.instance_id);
@@ -918,7 +1531,8 @@ fn run_passthrough(request: PassthroughRequest) -> Result<PassthroughOutcome> {
     let _ = reader_handle.join();
     reset_scroll_region(&mut stdout)?;
     disable_raw_mode()?;
-    Ok(PassthroughOutcome::BackToList)
+    execute!(stdout, Clear(ClearType::All), MoveTo(0, 0))?;
+    Ok(outcome)
 }
 
 fn matches_key(event: &KeyEvent, binding: &str) -> bool {

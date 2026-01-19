@@ -1,12 +1,15 @@
-use crate::models::AppConfig;
+use crate::models::{AppConfig, ClientConfig};
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
-const CONFIG_FILE_NAME: &str = "config.toml";
+const CLIENT_CONFIG_FILE_NAME: &str = "ch-client.toml";
+const SERVER_CONFIG_FILE_NAME: &str = "ch-server.toml";
+const CLIENT_GLOBAL_FILE_NAME: &str = "client.toml";
+const SERVER_GLOBAL_FILE_NAME: &str = "server.toml";
 const TASKS_DIR_NAME: &str = "tasks";
 
-pub async fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig> {
+pub async fn load_server_config<P: AsRef<Path>>(path: P) -> Result<AppConfig> {
     let content = fs::read_to_string(&path).await?;
     let mut config: AppConfig = toml::from_str(&content)?;
     
@@ -40,13 +43,24 @@ pub async fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig> {
     Ok(config)
 }
 
-pub async fn load_config_auto() -> Result<AppConfig> {
-    let path = resolve_config_path()?;
-    load_config(path).await
+pub async fn load_server_config_auto() -> Result<AppConfig> {
+    let path = resolve_server_config_path()?;
+    load_server_config(path).await
 }
 
-pub fn resolve_config_path() -> Result<PathBuf> {
-    let candidates = config_candidates();
+pub async fn load_client_config<P: AsRef<Path>>(path: P) -> Result<ClientConfig> {
+    let content = fs::read_to_string(&path).await?;
+    let config: ClientConfig = toml::from_str(&content)?;
+    Ok(config)
+}
+
+pub async fn load_client_config_auto() -> Result<ClientConfig> {
+    let path = resolve_client_config_path()?;
+    load_client_config(path).await
+}
+
+pub fn resolve_server_config_path() -> Result<PathBuf> {
+    let candidates = server_config_candidates();
     for path in &candidates {
         if path.exists() {
             return Ok(path.clone());
@@ -57,28 +71,53 @@ pub fn resolve_config_path() -> Result<PathBuf> {
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    Err(anyhow!("config.toml not found; searched: {}", searched))
+    Err(anyhow!(
+        "server config not found; searched: {}",
+        searched
+    ))
 }
 
-fn config_candidates() -> Vec<PathBuf> {
+pub fn resolve_client_config_path() -> Result<PathBuf> {
+    let candidates = client_config_candidates();
+    for path in &candidates {
+        if path.exists() {
+            return Ok(path.clone());
+        }
+    }
+    let searched = candidates
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(anyhow!(
+        "client config not found; searched: {}",
+        searched
+    ))
+}
+
+fn server_config_candidates() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
-    if let Ok(dir) = std::env::var("CMDHUB_CONFIG_DIR") {
-        paths.push(Path::new(&dir).join(CONFIG_FILE_NAME));
-    }
-
     if let Ok(current_dir) = std::env::current_dir() {
-        paths.push(current_dir.join(CONFIG_FILE_NAME));
-    }
-
-    if let Ok(xdg_home) = std::env::var("XDG_CONFIG_HOME") {
-        paths.push(Path::new(&xdg_home).join("cmdhub").join(CONFIG_FILE_NAME));
-    } else if let Ok(home) = std::env::var("HOME") {
-        paths.push(Path::new(&home).join(".config").join("cmdhub").join(CONFIG_FILE_NAME));
+        paths.push(current_dir.join(SERVER_CONFIG_FILE_NAME));
     }
 
     if let Ok(home) = std::env::var("HOME") {
-        paths.push(Path::new(&home).join(".cmdhub").join(CONFIG_FILE_NAME));
+        paths.push(Path::new(&home).join(".cmdhub").join(SERVER_GLOBAL_FILE_NAME));
+    }
+
+    paths
+}
+
+fn client_config_candidates() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        paths.push(current_dir.join(CLIENT_CONFIG_FILE_NAME));
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        paths.push(Path::new(&home).join(".cmdhub").join(CLIENT_GLOBAL_FILE_NAME));
     }
 
     paths
