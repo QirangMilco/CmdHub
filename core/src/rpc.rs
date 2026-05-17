@@ -1,4 +1,4 @@
-use crate::models::{InstanceInfo, Task};
+use crate::models::{InstanceInfo, SessionInfo, Task};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -19,6 +19,7 @@ pub enum RpcError {
 pub trait CmdHubService {
     async fn list_tasks() -> Result<Vec<Task>, RpcError>;
     async fn list_instances() -> Result<Vec<InstanceInfo>, RpcError>;
+    async fn get_history() -> Result<Vec<SessionInfo>, RpcError>;
     async fn spawn(task_id: String, params: HashMap<String, String>) -> Result<String, RpcError>;
     async fn stop(instance_id: String) -> Result<(), RpcError>;
     async fn remove_if_exited(instance_id: String) -> Result<bool, RpcError>;

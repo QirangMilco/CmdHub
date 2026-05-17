@@ -2,93 +2,89 @@
 
 ## 1. 目标概述
 
-当前 CmdHub CLI 是单体应用，生命周期与终端窗口绑定。为了实现多端接入（CLI/Web/Desktop）并支持任务在后台持久运行（如 tmux/screen），必须将架构重构为 **Client-Server** 模式。
+当前 CmdHub 已完成 CLI/Server 拆分与 RPC/Attach 接入，但持久化、版本兼容、安全与后台守护仍未完全落地。本文档更新为“现状对齐 + 待补齐清单”。
 
 - **CmdHub Server (Daemon)**: 负责进程托管、PTY 管理、状态维护、日志持久化。作为系统后台服务运行。
 - **CmdHub Core**: 定义通用的数据模型、RPC 接口契约、以及核心逻辑（Session/Storage）。
-- **CmdHub CLI (Client)**: 纯粹的 UI 展示层。负责发送指令（启动/停止任务）和渲染从 Server 流式传输过来的数据。
+- **CmdHub CLI (Client)**: 纯 UI 展示层。负责发送指令（启动/停止任务）和渲染从 Server 流式传输过来的数据。
 
-## 2. 架构设计
+## 2. 架构设计（现状对齐）
 
 ### 2.1 模块职责划分
 
-| 模块 | 职责变更 |
+| 模块 | 职责与现状 |
 | :--- | :--- |
-| **core** | 新增 `rpc` 模块，定义 Service trait 和 Request/Response 结构。统一 `InstanceInfo` 和 `SessionInfo` 的概念。 |
-| **server** | 独占 `SessionManager`。启动 RPC 服务监听（Unix Domain Socket 或 TCP）。处理 PTY IO 流的转发。 |
-| **cli** | 移除 `SessionManager`。启动时尝试连接 Server，连接失败则尝试启动 Server。TUI 数据源改为 RPC 调用。 |
+| **core** | 已有 `rpc` 模块和 `RpcError`，模型中同时存在 `InstanceInfo` 与 `SessionInfo`；目前运行时仅使用 `InstanceInfo`，`SessionInfo` 未接入持久化链路。 |
+| **server** | 已独占 `SessionManager`，提供 tarpc RPC 监听（Unix/TCP），处理 PTY IO 与 attach 流，支持多客户端广播。 |
+| **cli** | 已移除 `SessionManager`，启动时尝试连接 Server，失败时可自动启动本地 Server；TUI 数据源改为 RPC 调用。 |
 
 ### 2.2 通信协议策略
 
-- **控制平面 (Control Plane)**: 使用 RPC (推荐 `tarpc` 或 `tonic`) 处理低频交互。
+- **控制平面 (Control Plane)**: 已采用 tarpc RPC 处理低频交互。
+  - `list_tasks()` -> `Vec<Task>`
   - `list_instances()` -> `Vec<InstanceInfo>`
-  - `spawn_task(task_id, params)` -> `instance_id`
-  - `stop_instance(instance_id)`
-  - `get_history()`
-- **数据平面 (Data Plane)**: 处理高频 IO (PTY Stream)。
-  - `attach(instance_id)` -> 建立全双工流 (WebSocket 或 Raw TCP/UDS Stream)。
-  - 将 Server 端的 PTY Master `Reader`/`Writer` 对接至网络 Socket。
+  - `spawn(task_id, params)` -> `instance_id`
+  - `stop(instance_id)`
+  - `remove_if_exited(instance_id)`
+  - `shutdown()`
+- **数据平面 (Data Plane)**: 使用 Raw UDS/TCP Stream。
+  - `attach(instance_id)` 通过首行发送 `instance_id`，返回 `OK\n`/`ERR\n`，随后双向转发流。
+  - Server 端维护输出 ring buffer，attach 后先回放快照，再转发实时输出；支持多 client 订阅同一实例输出。
 
-## 3. 详细实施计划
+## 3. 实施计划与完成度
 
-### 阶段 3.1: Core 层重构与协议定义
+### 3.1 Core 层重构与协议定义
 
-- [ ] **统一模型**: 在 `core/src/models.rs` 中统一 `Session` (持久化记录) 和 `Instance` (运行时状态) 的字段定义，确保能被序列化 (Serde)。
-- [ ] **RPC 定义**: 在 `core/src/rpc.rs` 中定义服务接口。
-  ```rust
-  #[tarpc::service]
-  pub trait CmdHubService {
-      async fn list_instances() -> Vec<InstanceInfo>;
-      async fn spawn(task_id: String, env: HashMap<String, String>) -> Result<String, String>;
-      async fn stop(instance_id: String) -> Result<(), String>;
-  }
-  ```
-- [ ] **错误处理**: 定义统一的 `RpcError` 枚举。
+- [ ] **统一模型**: `SessionInfo` 与 `InstanceInfo` 尚未打通，持久化模型未接入运行时。
+- [x] **RPC 定义**: `core/src/rpc.rs` 已定义 `CmdHubService` trait。
+- [x] **错误处理**: 已提供 `RpcError` 枚举。
+- [ ] **历史记录 API**: `get_history()` 仍缺失。
 
-### 阶段 3.2: Server 端实现 (The Brain)
+### 3.2 Server 端实现 (The Brain)
 
-- [ ] **守护进程化**: 修改 `server/src/main.rs`，使其启动一个 Tokio Runtime 并监听端口/Socket文件。
-- [ ] **SessionManager 迁移**: 将 `cli/src/main.rs` 中的 `SessionManager` 逻辑完全迁移至 `server` crate。
-- [ ] **实现 RPC Handler**: 实现 `CmdHubService` trait，对接 `SessionManager`。
-- [ ] **PTY 流管理**: 
-  - 当 Client 请求 `attach` 时，Server 需要升级连接或建立新连接。
-  - 实现一个 `Broadcast` 机制，允许多个 Client 同时观察同一个任务的输出（类似直播）。
+- [x] **Tokio server scaffold**: Server 启动 tarpc 监听并绑定 attach endpoint。
+- [x] **SessionManager 迁移**: 运行态与 PTY 管理已迁移至 server。
+- [x] **实现 RPC Handler**: 已实现 `list_tasks/list_instances/spawn/stop/remove_if_exited/shutdown`。
+- [x] **PTY 流管理**: attach 双向转发 + 广播机制已实现。
+- [ ] **守护进程化**: Server 本体仍是前台进程，需补齐 daemon 化与自管理。
+- [ ] **日志重定向**: 仅 CLI 启动 server 时重定向至 `~/.cmdhub/server.log`，手动启动未覆盖。
+- [ ] **持久化 Session/日志**: `SessionStore` 未接入，重启后状态无法恢复。
 
-### 阶段 3.3: CLI 端重构 (The Remote)
+### 3.3 CLI 端重构 (The Remote)
 
-- [ ] **连接管理**: 启动时检查 Server 是否存活。
-  - 若存活：建立连接。
-  - 若不存在：`Command::new("cmdhub-server").spawn()` 启动后台进程并等待连接。
-- [ ] **UI 数据源替换**:
-  - `App::refresh_instances()` 从调用本地函数改为 `client.list_instances().await`。
-- [ ] **Attach 逻辑重写**:
-  - 现有的 `run_passthrough` 直接操作本地 PTY FD。
-  - 新逻辑需要操作 `TcpStream` 或 `UnixStream`，将网络字节流写入 `stdout`，将 `stdin` 读取发送至网络。
+- [x] **连接管理**: 支持连接现有 Server，必要时自动启动本地 Server。
+- [x] **UI 数据源替换**: 通过 RPC 拉取 tasks/instances。
+- [x] **Attach 逻辑重写**: 通过 Unix/TCP stream 与 Server 直连。
 
-### 阶段 3.4: 验证与清理
+### 3.4 验证与清理
 
-- [ ] **多会话测试**: 打开两个 CLI 窗口，验证能否看到相同的任务列表和状态。
-- [ ] **持久化测试**: 关闭 CLI，Server 保持运行；重新打开 CLI，任务仍在运行。
-- [ ] **清理代码**: 移除 CLI 中残留的直接 PTY 依赖 (portable-pty 依赖应仅存在于 Server 和 Core)。
+- [ ] **多会话测试**: 多个 CLI 同时观察任务输出需补充验证。
+- [ ] **持久化测试**: Server 重启后的任务恢复未实现。
+- [x] **清理代码**: CLI 不再依赖 portable-pty，PTY 仅保留于 core/server。
 
-## 4. 进度追踪
+## 4. 进度追踪（更新版）
 
 ### 3.1 Core Definition
-- [ ] Move `InstanceInfo` to generic serializable model
-- [ ] Define `CmdHubService` trait (tarpc)
+- [x] Define `CmdHubService` trait (tarpc)
+- [x] Add `RpcError`
+- [ ] Unify `SessionInfo` / `InstanceInfo`
+- [ ] Add history APIs
 
 ### 3.2 Server Implementation
-- [ ] Setup `tokio` server scaffold
-- [ ] Port `SessionManager` to Server
-- [ ] Implement `list` and `spawn` RPC methods
+- [x] Setup tokio server scaffold
+- [x] Port `SessionManager` to server
+- [x] Implement RPC methods
+- [ ] Daemonize + log redirection
+- [ ] Persist session/logs
 
 ### 3.3 CLI Adaptation
-- [ ] Implement Server auto-discovery/launch
-- [ ] Replace `App` state management with RPC calls
-- [ ] Implement Networked `Attach` (Passthrough)
+- [x] Server auto-discovery/launch
+- [x] RPC-based `App` state
+- [x] Networked `Attach`
 
-## 5. 关键注意事项
+## 5. 关键注意事项（仍待实现）
 
-1.  **版本兼容性**: 确保 Core 版本变更时，Client 和 Server 能检测版本不匹配。
-2.  **安全性**: 暂时仅监听 Localhost (127.0.0.1) 或 用户级 Unix Socket (`~/.cmdhub/cmdhub.sock`)，避免暴露给公网。
-3.  **日志**: Server 的 stdout/stderr 应该重定向到文件 (`~/.cmdhub/server.log`) 以便调试，因为它是后台运行的。
+1. **版本兼容性**: Client/Server 需增加版本握手或协议版本字段。
+2. **安全性**: TCP 监听需限制为 localhost 或加入鉴权；默认推荐 UDS。
+3. **日志/守护**: Server 本体需支持后台运行与 stdout/stderr 统一落盘。
+4. **持久化**: 使用 `SessionStore` 持久化元数据与输出日志，提供历史检索 API。

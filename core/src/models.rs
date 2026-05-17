@@ -198,6 +198,8 @@ pub enum InstanceStatus {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct InstanceInfo {
     pub id: String,
+    #[serde(default)]
+    pub session_id: Option<Uuid>,
     pub task_id: String,
     pub task_name: String,
     pub status: InstanceStatus,

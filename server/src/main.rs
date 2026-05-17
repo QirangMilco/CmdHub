@@ -1,27 +1,32 @@
 use anyhow::{anyhow, Result};
-use cmdhub_core::config::load_server_config_auto;
+use cmdhub_core::config::{load_client_config_auto, load_server_config_auto};
 use cmdhub_core::instance::{SessionManager, SpawnedInstance};
-use cmdhub_core::models::{AppConfig, InstanceInfo, Task};
+use cmdhub_core::models::{
+    AppConfig, InstanceInfo, InstanceStatus, SessionInfo, SessionStatus, Task,
+};
 use cmdhub_core::rpc::{
     default_attach_uri, default_rpc_uri, parse_endpoint, CmdHubService, RpcEndpoint, RpcError,
 };
+use cmdhub_core::session::SessionStore;
 use cmdhub_core::template::render_command;
 use futures::StreamExt;
 use portable_pty::MasterPty;
 use signal_hook::consts::{SIGINT, SIGQUIT, SIGTERM};
 use signal_hook::iterator::Signals;
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, UnixListener};
 use tarpc::context;
 use tarpc::server::{self, Channel};
 use tokio_serde::formats::Json;
 
 const BUFFER_CAP: usize = 16 * 1024;
+const DEFAULT_HISTORY_LIMIT: usize = 10;
 
 #[derive(Clone)]
 struct CmdHubServer {
@@ -31,6 +36,8 @@ struct CmdHubServer {
 struct ServerState {
     manager: SessionManager,
     config: AppConfig,
+    session_store: SessionStore,
+    history_limit: usize,
     io_map: Mutex<HashMap<String, InstanceIo>>,
 }
 
@@ -53,6 +60,13 @@ impl CmdHubService for CmdHubServer {
             .map_err(|err| RpcError::Internal(err.to_string()))
     }
 
+    async fn get_history(self, _: context::Context) -> Result<Vec<SessionInfo>, RpcError> {
+        self.state
+            .session_store
+            .list_history()
+            .map_err(|err| RpcError::Internal(err.to_string()))
+    }
+
     async fn spawn(
         self,
         _: context::Context,
@@ -69,12 +83,44 @@ impl CmdHubService for CmdHubServer {
             .ok_or_else(|| RpcError::NotFound(format!("task {}", task_id)))?;
         let command = render_command(&task.command, &params, task.inputs.as_ref())
             .map_err(|err| RpcError::Invalid(format!("render command: {}", err)))?;
-        let spawned = self
+
+        let session = self
+            .state
+            .session_store
+            .create_session(
+                task.id.clone(),
+                task.name.clone(),
+                None,
+                command.clone(),
+                task.cwd.clone(),
+                task.env.clone(),
+                task.env_clear.unwrap_or(false),
+            )
+            .map_err(|err| RpcError::Internal(err.to_string()))?;
+        let session_id = session.id;
+        let spawned = match self
             .state
             .manager
-            .spawn_raw(&task, &command)
-            .map_err(|err| RpcError::Internal(err.to_string()))?;
+            .spawn_raw_with_session(&task, &command, Some(session_id))
+        {
+            Ok(spawned) => spawned,
+            Err(err) => {
+                let _ = fs::remove_dir_all(self.state.session_store.session_dir(session_id));
+                return Err(RpcError::Internal(err.to_string()));
+            }
+        };
         let instance_id = spawned.info.id.clone();
+
+        let mut session = session;
+        session.status = SessionStatus::Running;
+        session.started_at = spawned.info.started_at;
+        session.runner_pid = Some(std::process::id());
+        session.child_pid = spawned.info.child_pid;
+        self.state
+            .session_store
+            .write_session(&session)
+            .map_err(|err| RpcError::Internal(err.to_string()))?;
+
         self.state
             .register_instance_io(spawned)
             .map_err(|err| RpcError::Internal(err.to_string()))?;
@@ -84,9 +130,8 @@ impl CmdHubService for CmdHubServer {
     async fn stop(self, _: context::Context, instance_id: String) -> Result<(), RpcError> {
         self.state
             .manager
-            .kill_and_remove(&instance_id)
+            .kill(&instance_id)
             .map_err(|err| RpcError::Internal(err.to_string()))?;
-        self.state.remove_instance_io(&instance_id);
         Ok(())
     }
 
@@ -95,10 +140,15 @@ impl CmdHubService for CmdHubServer {
         _: context::Context,
         instance_id: String,
     ) -> Result<bool, RpcError> {
-        self.state
+        let removed = self
+            .state
             .manager
             .remove_if_exited(&instance_id)
-            .map_err(|err| RpcError::Internal(err.to_string()))
+            .map_err(|err| RpcError::Internal(err.to_string()))?;
+        if removed {
+            self.state.remove_instance_io(&instance_id);
+        }
+        Ok(removed)
     }
 
     async fn shutdown(self, _: context::Context) -> Result<(), RpcError> {
@@ -119,6 +169,12 @@ impl ServerState {
             .master
             .try_clone_reader()
             .map_err(|err| anyhow!("clone reader: {}", err))?;
+        let mut log_file = if let Some(session_id) = spawned.info.session_id {
+            let log_path = self.session_store.session_log_path(session_id);
+            Some(OpenOptions::new().create(true).append(true).open(log_path)?)
+        } else {
+            None
+        };
         let writer = Arc::new(Mutex::new(spawned.writer));
         let clients = Arc::new(Mutex::new(Vec::<mpsc::Sender<Vec<u8>>>::new()));
 
@@ -133,6 +189,10 @@ impl ServerState {
                     Ok(0) => break,
                     Ok(n) => {
                         let _ = manager.append_output(&instance_id_clone, &buf[..n]);
+                        if let Some(file) = log_file.as_mut() {
+                            let _ = file.write_all(&buf[..n]);
+                            let _ = file.flush();
+                        }
                         let mut to_remove = Vec::new();
                         if let Ok(mut guard) = clients_clone.lock() {
                             for (idx, sender) in guard.iter().enumerate() {
@@ -179,19 +239,53 @@ impl ServerState {
             guard.remove(instance_id);
         }
     }
+
+    fn update_session_on_exit(&self, info: InstanceInfo) {
+        let Some(session_id) = info.session_id else {
+            return;
+        };
+        let mut session = match self.session_store.load_session(session_id) {
+            Ok(session) => session,
+            Err(_) => return,
+        };
+        session.status = SessionStatus::Exited;
+        session.ended_at = info.ended_at.or_else(|| Some(now_epoch()));
+        session.exit_code = match info.status {
+            InstanceStatus::Exited { code } => Some(code),
+            _ => None,
+        };
+        session.child_pid = info.child_pid;
+        let _ = self.session_store.write_session(&session);
+        let _ = self
+            .session_store
+            .move_to_history(session_id, self.history_limit);
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
     let config = load_server_config_auto().await?;
+    let history_limit = load_client_config_auto()
+        .await
+        .ok()
+        .and_then(|cfg| cfg.history_limit)
+        .unwrap_or(DEFAULT_HISTORY_LIMIT);
+    let session_store = SessionStore::new()?;
+    recover_orphaned_sessions(&session_store, history_limit);
     let server_cfg = config.server.clone();
     let manager = SessionManager::new(BUFFER_CAP);
     let state = Arc::new(ServerState {
         manager,
         config,
+        session_store,
+        history_limit,
         io_map: Mutex::new(HashMap::new()),
     });
+    let state_for_hook = Arc::clone(&state);
+    state.manager.set_exit_hook(Arc::new(move |info| {
+        state_for_hook.update_session_on_exit(info);
+    }));
 
     setup_signal_handlers(Arc::clone(&state))?;
     write_pid_file()?;
@@ -309,6 +403,28 @@ fn prepare_socket(path: &PathBuf) -> Result<()> {
         fs::remove_file(path)?;
     }
     Ok(())
+}
+
+fn now_epoch() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
+fn recover_orphaned_sessions(store: &SessionStore, history_limit: usize) {
+    let sessions = match store.list_sessions() {
+        Ok(sessions) => sessions,
+        Err(_) => return,
+    };
+    for mut session in sessions {
+        if session.status != SessionStatus::Exited {
+            session.status = SessionStatus::Exited;
+            session.ended_at = Some(now_epoch());
+            let _ = store.write_session(&session);
+        }
+        let _ = store.move_to_history(session.id, history_limit);
+    }
 }
 
 async fn run_attach_listener_unix(listener: UnixListener, state: Arc<ServerState>) -> Result<()> {

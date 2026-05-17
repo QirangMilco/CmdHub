@@ -7,6 +7,7 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 pub struct SpawnedInstance {
     pub info: InstanceInfo,
@@ -62,6 +63,7 @@ pub struct SessionManager {
     instances: Arc<Mutex<HashMap<String, InstanceEntry>>>,
     counters: Arc<Mutex<HashMap<String, u32>>>,
     buffer_cap: usize,
+    on_exit: Arc<Mutex<Option<Arc<dyn Fn(InstanceInfo) + Send + Sync>>>>,
 }
 
 impl SessionManager {
@@ -70,10 +72,26 @@ impl SessionManager {
             instances: Arc::new(Mutex::new(HashMap::new())),
             counters: Arc::new(Mutex::new(HashMap::new())),
             buffer_cap,
+            on_exit: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn set_exit_hook(&self, hook: Arc<dyn Fn(InstanceInfo) + Send + Sync>) {
+        if let Ok(mut guard) = self.on_exit.lock() {
+            *guard = Some(hook);
         }
     }
 
     pub fn spawn_raw(&self, task: &Task, command: &str) -> Result<SpawnedInstance> {
+        self.spawn_raw_with_session(task, command, None)
+    }
+
+    pub fn spawn_raw_with_session(
+        &self,
+        task: &Task,
+        command: &str,
+        session_id: Option<Uuid>,
+    ) -> Result<SpawnedInstance> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows: 24,
@@ -121,6 +139,7 @@ impl SessionManager {
         let now = now_epoch();
         let info = InstanceInfo {
             id: instance_id.clone(),
+            session_id,
             task_id: task.id.clone(),
             task_name: task.name.clone(),
             status: InstanceStatus::Running,
@@ -146,19 +165,31 @@ impl SessionManager {
 
         let instances = Arc::clone(&self.instances);
         let instance_id_clone = instance_id.clone();
+        let on_exit = Arc::clone(&self.on_exit);
         tokio::task::spawn_blocking(move || {
             let status = child.wait();
-            let mut guard = match instances.lock() {
-                Ok(guard) => guard,
-                Err(_) => return,
-            };
-            if let Some(entry) = guard.get_mut(&instance_id_clone) {
-                let ended_at = now_epoch();
-                entry.info.ended_at = Some(ended_at);
-                entry.info.status = match status {
-                    Ok(exit) => InstanceStatus::Exited { code: exit.exit_code() },
-                    Err(err) => InstanceStatus::Error { message: err.to_string() },
+            let mut exit_info = None;
+            {
+                let mut guard = match instances.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return,
                 };
+                if let Some(entry) = guard.get_mut(&instance_id_clone) {
+                    let ended_at = now_epoch();
+                    entry.info.ended_at = Some(ended_at);
+                    entry.info.status = match status {
+                        Ok(exit) => InstanceStatus::Exited { code: exit.exit_code() },
+                        Err(err) => InstanceStatus::Error { message: err.to_string() },
+                    };
+                    exit_info = Some(entry.info.clone());
+                }
+            }
+            if let Some(info) = exit_info {
+                if let Ok(guard) = on_exit.lock() {
+                    if let Some(hook) = guard.as_ref() {
+                        hook(info);
+                    }
+                }
             }
         });
 
@@ -166,7 +197,7 @@ impl SessionManager {
     }
 
     pub fn spawn(&self, task: &Task, command: &str) -> Result<InstanceInfo> {
-        let spawned = self.spawn_raw(task, command)?;
+        let spawned = self.spawn_raw_with_session(task, command, None)?;
         self.return_master(&spawned.info.id, spawned.master, spawned.writer)?;
         Ok(spawned.info)
     }
