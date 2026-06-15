@@ -1,7 +1,0 @@
-{
-  "alwaysApprovedTools": [
-    "terminal-execute",
-    "filesystem-read",
-    "filesystem-edit_search"
-  ]
-}
