@@ -8,26 +8,53 @@ class StatusBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final (color, text) = switch (status) {
-      InstanceStatus_Running() => (Colors.green, '运行中'),
-      InstanceStatus_Exited(code: final c) => (Colors.grey, '退出 $c'),
-      InstanceStatus_Error(message: final m) => (Colors.red, m),
+    final (bgColor, textColor, text) = switch (status) {
+      InstanceStatus_Running() => (
+          const Color(0xFFDCFCE7),
+          const Color(0xFF166534),
+          '运行中',
+        ),
+      InstanceStatus_Exited(code: final c) => (
+          const Color(0xFFF3F4F6),
+          const Color(0xFF6B7280),
+          '退出 $c',
+        ),
+      InstanceStatus_Error(message: final m) => (
+          const Color(0xFFFEE2E2),
+          const Color(0xFF991B1B),
+          m.length > 12 ? '${m.substring(0, 12)}...' : m,
+        ),
     };
 
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 8,
-          height: 8,
-          decoration: BoxDecoration(
-            color: color,
-            shape: BoxShape.circle,
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: bgColor,
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(
+              color: textColor,
+              shape: BoxShape.circle,
+            ),
           ),
-        ),
-        const SizedBox(width: 6),
-        Text(text, style: TextStyle(color: color, fontSize: 12)),
-      ],
+          const SizedBox(width: 6),
+          Text(
+            text,
+            style: TextStyle(
+              color: textColor,
+              fontSize: 11,
+              fontWeight: FontWeight.w500,
+              height: 1.2,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
