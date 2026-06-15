@@ -1,0 +1,27 @@
+import 'package:flutter/material.dart';
+
+class CustomAppBar extends StatelessWidget implements PreferredSizeWidget {
+  final Widget title;
+  final Color backgroundColor;
+  final List<Widget> actions;
+
+  const CustomAppBar({
+    super.key,
+    required this.title,
+    this.backgroundColor = Colors.teal,
+    this.actions = const [],
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AppBar(
+      title: title,
+      backgroundColor: backgroundColor,
+      foregroundColor: Colors.white,
+      actions: actions,
+    );
+  }
+
+  @override
+  Size get preferredSize => const Size.fromHeight(kToolbarHeight);
+}
