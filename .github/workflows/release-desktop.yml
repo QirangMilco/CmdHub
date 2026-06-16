@@ -208,8 +208,18 @@ jobs:
       - name: 打包 exe
         shell: pwsh
         run: |
-          Compress-Archive -Path build\windows\runner\Release\* -DestinationPath CmdHub-$env:VERSION-windows-amd64.zip
-          Get-ChildItem CmdHub-$env:VERSION-windows-amd64.zip
+          $releaseDir = "build\windows\runner\Release"
+          if (Test-Path $releaseDir) {
+            Write-Host "Release 目录内容:"
+            Get-ChildItem $releaseDir | Format-Table Name, Length
+            Compress-Archive -Path "$releaseDir\*" -DestinationPath "CmdHub-$env:VERSION-windows-amd64.zip"
+            Get-ChildItem "CmdHub-$env:VERSION-windows-amd64.zip"
+          } else {
+            Write-Host "目录 $releaseDir 不存在，尝试搜索构建输出..."
+            Get-ChildItem -Path build -Recurse -Filter "*.exe" | Select-Object FullName | Format-Table
+            Get-ChildItem -Path build -Recurse -Depth 3 | Select-Object FullName | Format-Table
+            exit 1
+          }
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
