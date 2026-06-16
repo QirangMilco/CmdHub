@@ -208,16 +208,24 @@ jobs:
       - name: 打包 exe
         shell: pwsh
         run: |
-          $releaseDir = "build\windows\runner\Release"
+          # Flutter Windows 的 CMake 构建输出在 x64 子目录下
+          $releaseDir = "build\windows\x64\runner\Release"
+          if (-not (Test-Path $releaseDir)) {
+            # 回退：直接搜索 Release 目录
+            $releaseDir = Get-ChildItem -Path build\windows -Recurse -Directory -Filter "Release" `
+              | Where-Object { $_.FullName -like "*\runner\Release" } `
+              | Select-Object -First 1 -ExpandProperty FullName
+          }
           if (Test-Path $releaseDir) {
-            Write-Host "Release 目录内容:"
+            Write-Host "Release 目录: $releaseDir"
+            Write-Host "目录内容:"
             Get-ChildItem $releaseDir | Format-Table Name, Length
-            Compress-Archive -Path "$releaseDir\*" -DestinationPath "CmdHub-$env:VERSION-windows-amd64.zip"
-            Get-ChildItem "CmdHub-$env:VERSION-windows-amd64.zip"
+            $zipName = "CmdHub-$env:VERSION-windows-amd64.zip"
+            Compress-Archive -Path "$releaseDir\*" -DestinationPath $zipName
+            Get-ChildItem $zipName
           } else {
-            Write-Host "目录 $releaseDir 不存在，尝试搜索构建输出..."
-            Get-ChildItem -Path build -Recurse -Filter "*.exe" | Select-Object FullName | Format-Table
-            Get-ChildItem -Path build -Recurse -Depth 3 | Select-Object FullName | Format-Table
+            Write-Host "未找到 Release 目录，搜索整个 build 目录..."
+            Get-ChildItem -Path build -Recurse -Directory -Filter "Release" | Select-Object FullName
             exit 1
           }
 
