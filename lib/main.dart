@@ -68,6 +68,12 @@ void _writeLog(_LogLevel level, String msg) {
 // App 入口
 // ============================================================
 
+String _cmdhubDllPath() {
+  // cmdhub_core.dll 应与 exe 同级
+  final exeDir = File(Platform.resolvedExecutable).parent.path;
+  return '$exeDir${Platform.pathSeparator}cmdhub_core.dll';
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -75,10 +81,12 @@ Future<void> main() async {
   _writeLog(_LogLevel.debug, 'log dir: ${_logDir()}');
 
   try {
-    await RustLib.init(
-      externalLibrary: ExternalLibrary.process(iKnowHowToUseIt: true),
-    );
-    // RustLib.init() 已自动调用 #[frb(init)] 标注的 init_app()
+    // macOS/Linux：静态链接，从进程查找符号
+    // Windows：cdylib 生成 cmdhub_core.dll，从文件加载
+    final library = Platform.isWindows
+        ? ExternalLibrary.open(_cmdhubDllPath())
+        : ExternalLibrary.process(iKnowHowToUseIt: true);
+    await RustLib.init(externalLibrary: library);
   } catch (e) {
     _writeLog(_LogLevel.error, 'Rust init failed: $e');
     rethrow;
