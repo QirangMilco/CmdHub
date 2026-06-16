@@ -35,9 +35,14 @@ fn tokio_runtime() -> &'static Runtime {
 
 #[frb(init)]
 pub fn init_app() {
+    storage::log_info("CmdHub Rust init start");
     flutter_rust_bridge::setup_default_user_utils();
-    // 预初始化 Tokio runtime
+    storage::log_debug("user utils setup ok");
     let _ = tokio_runtime();
+    storage::log_debug("Tokio runtime ok");
+    executor();
+    pipeline_runner();
+    storage::log_info("CmdHub Rust init complete");
 }
 
 // ============================================================

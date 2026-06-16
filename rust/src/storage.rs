@@ -183,3 +183,81 @@ pub fn remove_run(run_id: &str) -> Result<()> {
     runs.retain(|r| r.run_id != run_id);
     save_runs(&runs)
 }
+
+// ============================================================
+// 日志系统 —— 带级别控制
+// ============================================================
+
+/// 日志级别
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LogLevel {
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl LogLevel {
+    fn from_env() -> Self {
+        if let Ok(val) = std::env::var("CMDHUB_LOG") {
+            match val.to_lowercase().as_str() {
+                "debug" => Self::Debug,
+                "info" => Self::Info,
+                "warn" => Self::Warn,
+                "error" => Self::Error,
+                _ => Self::default(),
+            }
+        } else {
+            Self::default()
+        }
+    }
+}
+
+impl Default for LogLevel {
+    fn default() -> Self {
+        // debug 编译输出 Info 及以上，release 只输出 Warn 及以上
+        if cfg!(debug_assertions) {
+            Self::Info
+        } else {
+            Self::Warn
+        }
+    }
+}
+
+/// 判断指定级别是否应输出
+pub fn log_enabled(level: LogLevel) -> bool {
+    static CURRENT: std::sync::OnceLock<LogLevel> = std::sync::OnceLock::new();
+    let current = *CURRENT.get_or_init(LogLevel::from_env);
+    level >= current
+}
+
+/// 写入日志（格式化）
+pub fn log_msg(level: LogLevel, msg: &str) {
+    if !log_enabled(level) {
+        return;
+    }
+    let prefix = match level {
+        LogLevel::Debug => "[DEBUG]",
+        LogLevel::Info => "[INFO]",
+        LogLevel::Warn => "[WARN]",
+        LogLevel::Error => "[ERROR]",
+    };
+    let line = format!("{} {}", prefix, msg);
+    if let Ok(dir) = data_dir() {
+        let path = dir.join("cmdhub.log");
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "{}", line);
+        }
+    }
+}
+
+/// 便捷函数
+pub fn log_debug(msg: &str) { log_msg(LogLevel::Debug, msg); }
+pub fn log_info(msg: &str) { log_msg(LogLevel::Info, msg); }
+pub fn log_warn(msg: &str) { log_msg(LogLevel::Warn, msg); }
+pub fn log_error(msg: &str) { log_msg(LogLevel::Error, msg); }
