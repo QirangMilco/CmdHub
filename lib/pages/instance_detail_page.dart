@@ -226,7 +226,7 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
                         Expanded(
                           child: TextField(
                             controller: _inputController,
-                            style: const TextStyle(fontFamily: 'monospace'),
+                            style: TextStyle(fontFamily: AppTheme.monoFont),
                             decoration: const InputDecoration(
                               hintText: '输入命令...',
                               border: OutlineInputBorder(),

@@ -168,7 +168,7 @@ class _TaskEditorPageState extends State<TaskEditorPage> {
                       labelText: '命令',
                       hintText: '输入要执行的命令',
                     ),
-                    style: const TextStyle(fontFamily: 'monospace'),
+                    style: TextStyle(fontFamily: AppTheme.monoFont),
                   ),
                   const SizedBox(height: 12),
                   TextField(

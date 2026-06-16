@@ -8,6 +8,10 @@ class AppTheme {
   static const Color accentLight = Color(0xFF818CF8);
   static const Color accentDark = Color(0xFF4F46E5);
 
+  // 字体
+  static const String uiFont = 'NotoSansSC';
+  static const String monoFont = 'JetBrainsMono';
+
   // 状态色 — 低饱和度，融入灰调
   static const Color success = Color(0xFF10B981);
   static const Color warning = Color(0xFFF59E0B);
@@ -46,6 +50,7 @@ class AppTheme {
     return ThemeData(
       useMaterial3: true,
       brightness: brightness,
+      fontFamily: 'NotoSansSC',
       scaffoldBackgroundColor: isDark ? darkBg : lightBg,
       cardColor: isDark ? darkCard : lightCard,
       dividerColor: isDark ? darkDivider : lightDivider,

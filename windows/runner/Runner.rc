@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "com.cmdhub" "\0"
-            VALUE "FileDescription", "cmdhub" "\0"
+            VALUE "FileDescription", "CmdHub" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "cmdhub" "\0"
+            VALUE "InternalName", "CmdHub" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 com.cmdhub. All rights reserved." "\0"
-            VALUE "OriginalFilename", "cmdhub.exe" "\0"
-            VALUE "ProductName", "cmdhub" "\0"
+            VALUE "OriginalFilename", "CmdHub.exe" "\0"
+            VALUE "ProductName", "CmdHub" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

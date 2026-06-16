@@ -740,7 +740,7 @@ class _TaskCard extends StatelessWidget {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          fontFamily: 'monospace',
+                          fontFamily: AppTheme.monoFont,
                           fontSize: 12,
                           height: 1.4,
                           color: AppTheme.textSecondary(isDark),
