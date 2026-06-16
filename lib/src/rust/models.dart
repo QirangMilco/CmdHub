@@ -39,6 +39,20 @@ sealed class InstanceStatus with _$InstanceStatus {
       InstanceStatus_Error;
 }
 
+class InstanceStatus_Killed extends InstanceStatus {
+  const InstanceStatus_Killed() : super._();
+
+  @override
+  String toString() => 'InstanceStatus.killed()';
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) || other is InstanceStatus_Killed;
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+}
+
 /// 编排：一组按顺序执行的任务
 class Pipeline {
   final String id;
@@ -62,34 +76,46 @@ class Pipeline {
 
 /// 编排运行状态
 class PipelineRunState {
+  final String runId;
   final String pipelineId;
   final String pipelineName;
   final List<StepState> stepStates;
   final PipelineStatus status;
+  final BigInt startedAt;
+  final BigInt? endedAt;
 
   const PipelineRunState({
+    required this.runId,
     required this.pipelineId,
     required this.pipelineName,
     required this.stepStates,
     required this.status,
+    required this.startedAt,
+    this.endedAt,
   });
 
   @override
   int get hashCode =>
+      runId.hashCode ^
       pipelineId.hashCode ^
       pipelineName.hashCode ^
       stepStates.hashCode ^
-      status.hashCode;
+      status.hashCode ^
+      startedAt.hashCode ^
+      endedAt.hashCode;
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       other is PipelineRunState &&
           runtimeType == other.runtimeType &&
+          runId == other.runId &&
           pipelineId == other.pipelineId &&
           pipelineName == other.pipelineName &&
           stepStates == other.stepStates &&
-          status == other.status;
+          status == other.status &&
+          startedAt == other.startedAt &&
+          endedAt == other.endedAt;
 }
 
 /// 编排运行状态
@@ -227,6 +253,7 @@ class TaskInstance {
   final BigInt startedAt;
   final BigInt? endedAt;
   final int? childPid;
+  final String? runId;
 
   const TaskInstance({
     required this.id,
@@ -237,6 +264,7 @@ class TaskInstance {
     required this.startedAt,
     this.endedAt,
     this.childPid,
+    this.runId,
   });
 
   @override
@@ -248,7 +276,8 @@ class TaskInstance {
       status.hashCode ^
       startedAt.hashCode ^
       endedAt.hashCode ^
-      childPid.hashCode;
+      childPid.hashCode ^
+      runId.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -262,7 +291,8 @@ class TaskInstance {
           status == other.status &&
           startedAt == other.startedAt &&
           endedAt == other.endedAt &&
-          childPid == other.childPid;
+          childPid == other.childPid &&
+          runId == other.runId;
 }
 
 /// 执行模式

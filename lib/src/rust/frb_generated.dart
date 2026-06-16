@@ -944,6 +944,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         return InstanceStatus_Exited(code: dco_decode_u_32(raw[1]));
       case 2:
         return InstanceStatus_Error(message: dco_decode_String(raw[1]));
+      case 3:
+        return InstanceStatus_Killed();
       default:
         throw Exception("unreachable");
     }
@@ -1068,13 +1070,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   PipelineRunState dco_decode_pipeline_run_state(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
     return PipelineRunState(
-      pipelineId: dco_decode_String(arr[0]),
-      pipelineName: dco_decode_String(arr[1]),
-      stepStates: dco_decode_list_step_state(arr[2]),
-      status: dco_decode_pipeline_status(arr[3]),
+      runId: dco_decode_String(arr[0]),
+      pipelineId: dco_decode_String(arr[1]),
+      pipelineName: dco_decode_String(arr[2]),
+      stepStates: dco_decode_list_step_state(arr[3]),
+      status: dco_decode_pipeline_status(arr[4]),
+      startedAt: dco_decode_u_64(arr[5]),
+      endedAt: dco_decode_opt_box_autoadd_u_64(arr[6]),
     );
   }
 
@@ -1155,8 +1160,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskInstance dco_decode_task_instance(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 8)
-      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
     return TaskInstance(
       id: dco_decode_String(arr[0]),
       taskId: dco_decode_String(arr[1]),
@@ -1166,6 +1171,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       startedAt: dco_decode_u_64(arr[5]),
       endedAt: dco_decode_opt_box_autoadd_u_64(arr[6]),
       childPid: dco_decode_opt_box_autoadd_u_32(arr[7]),
+      runId: dco_decode_opt_String(arr[8]),
     );
   }
 
@@ -1316,6 +1322,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case 2:
         var var_message = sse_decode_String(deserializer);
         return InstanceStatus_Error(message: var_message);
+      case 3:
+        return InstanceStatus_Killed();
       default:
         throw UnimplementedError('');
     }
@@ -1534,15 +1542,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @protected
   PipelineRunState sse_decode_pipeline_run_state(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_runId = sse_decode_String(deserializer);
     var var_pipelineId = sse_decode_String(deserializer);
     var var_pipelineName = sse_decode_String(deserializer);
     var var_stepStates = sse_decode_list_step_state(deserializer);
     var var_status = sse_decode_pipeline_status(deserializer);
+    var var_startedAt = sse_decode_u_64(deserializer);
+    var var_endedAt = sse_decode_opt_box_autoadd_u_64(deserializer);
     return PipelineRunState(
+      runId: var_runId,
       pipelineId: var_pipelineId,
       pipelineName: var_pipelineName,
       stepStates: var_stepStates,
       status: var_status,
+      startedAt: var_startedAt,
+      endedAt: var_endedAt,
     );
   }
 
@@ -1643,6 +1657,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_startedAt = sse_decode_u_64(deserializer);
     var var_endedAt = sse_decode_opt_box_autoadd_u_64(deserializer);
     var var_childPid = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_runId = sse_decode_opt_String(deserializer);
     return TaskInstance(
       id: var_id,
       taskId: var_taskId,
@@ -1652,6 +1667,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       startedAt: var_startedAt,
       endedAt: var_endedAt,
       childPid: var_childPid,
+      runId: var_runId,
     );
   }
 
@@ -1808,6 +1824,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case InstanceStatus_Error(message: final message):
         sse_encode_i_32(2, serializer);
         sse_encode_String(message, serializer);
+      case InstanceStatus_Killed():
+        sse_encode_i_32(3, serializer);
     }
   }
 
@@ -2016,10 +2034,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.runId, serializer);
     sse_encode_String(self.pipelineId, serializer);
     sse_encode_String(self.pipelineName, serializer);
     sse_encode_list_step_state(self.stepStates, serializer);
     sse_encode_pipeline_status(self.status, serializer);
+    sse_encode_u_64(self.startedAt, serializer);
+    sse_encode_opt_box_autoadd_u_64(self.endedAt, serializer);
   }
 
   @protected
@@ -2101,6 +2122,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_64(self.startedAt, serializer);
     sse_encode_opt_box_autoadd_u_64(self.endedAt, serializer);
     sse_encode_opt_box_autoadd_u_32(self.childPid, serializer);
+    sse_encode_opt_String(self.runId, serializer);
   }
 
   @protected

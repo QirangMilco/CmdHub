@@ -75,4 +75,6 @@ class CmdHubService {
 
   Future<void> cancelPipeline(String runId) =>
       api.cancelPipeline(runId: runId);
+
+  Future<List<PipelineRunState>> listPipelineRuns() => api.listPipelineRuns();
 }

@@ -19,6 +19,11 @@ class StatusBadge extends StatelessWidget {
           const Color(0xFF6B7280),
           '退出 $c',
         ),
+      InstanceStatus_Killed() => (
+          const Color(0xFFFEF3C7),
+          const Color(0xFF92400E),
+          '已停止',
+        ),
       InstanceStatus_Error(message: final m) => (
           const Color(0xFFFEE2E2),
           const Color(0xFF991B1B),

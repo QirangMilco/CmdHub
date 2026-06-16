@@ -32,6 +32,7 @@ impl PipelineRunner {
         rt: &Runtime,
     ) -> Result<String> {
         let run_id = Uuid::new_v4().to_string();
+        let now = crate::executor::now_epoch();
 
         // 克隆 tasks 以满足 tokio::spawn 的 'static 约束
         let tasks: Vec<Task> = tasks.to_vec();
@@ -45,10 +46,13 @@ impl PipelineRunner {
             steps.iter().map(|_| StepState::Pending).collect();
 
         let run_state = PipelineRunState {
+            run_id: run_id.clone(),
             pipeline_id: pipeline.id.clone(),
             pipeline_name: pipeline.name.clone(),
             step_states: step_states.clone(),
             status: PipelineStatus::Running,
+            started_at: now,
+            ended_at: None,
         };
 
         {
@@ -71,6 +75,7 @@ impl PipelineRunner {
                     let guard = active_runs.lock().unwrap();
                     if let Some(state) = guard.get(&run_id_clone) {
                         if state.status == PipelineStatus::Cancelled {
+                            finalize_run(&active_runs, &run_id_clone, PipelineStatus::Cancelled);
                             return;
                         }
                     }
@@ -87,11 +92,7 @@ impl PipelineRunner {
                                 error: format!("task not found: {}", step.task_id),
                             },
                         );
-                        set_pipeline_status(
-                            &active_runs,
-                            &run_id_clone,
-                            PipelineStatus::Failed,
-                        );
+                        finalize_run(&active_runs, &run_id_clone, PipelineStatus::Failed);
                         return;
                     }
                 };
@@ -123,13 +124,14 @@ impl PipelineRunner {
                     let guard = active_runs.lock().unwrap();
                     if let Some(state) = guard.get(&run_id_clone) {
                         if state.status == PipelineStatus::Cancelled {
+                            finalize_run(&active_runs, &run_id_clone, PipelineStatus::Cancelled);
                             return;
                         }
                     }
                 }
 
                 // 启动任务
-                match executor.spawn(task) {
+                match executor.spawn(task, Some(run_id_clone.clone())) {
                     Ok(instance) => {
                         let instance_id = instance.id.clone();
                         update_step_state(
@@ -157,11 +159,7 @@ impl PipelineRunner {
                                             error: "instance error".to_string(),
                                         },
                                     );
-                                    set_pipeline_status(
-                                        &active_runs,
-                                        &run_id_clone,
-                                        PipelineStatus::Failed,
-                                    );
+                                    finalize_run(&active_runs, &run_id_clone, PipelineStatus::Failed);
                                     return;
                                 }
                                 _ => 0,
@@ -180,11 +178,7 @@ impl PipelineRunner {
                                     error: format!("exit code {}", exit_code),
                                 },
                             );
-                            set_pipeline_status(
-                                &active_runs,
-                                &run_id_clone,
-                                PipelineStatus::Failed,
-                            );
+                            finalize_run(&active_runs, &run_id_clone, PipelineStatus::Failed);
                             return;
                         }
 
@@ -207,17 +201,13 @@ impl PipelineRunner {
                                 error: e.to_string(),
                             },
                         );
-                        set_pipeline_status(
-                            &active_runs,
-                            &run_id_clone,
-                            PipelineStatus::Failed,
-                        );
+                        finalize_run(&active_runs, &run_id_clone, PipelineStatus::Failed);
                         return;
                     }
                 }
             }
 
-            set_pipeline_status(&active_runs, &run_id_clone, PipelineStatus::Completed);
+            finalize_run(&active_runs, &run_id_clone, PipelineStatus::Completed);
         });
 
         Ok(run_id)
@@ -241,16 +231,31 @@ impl PipelineRunner {
             .active_runs
             .lock()
             .map_err(|_| anyhow!("active runs lock poisoned"))?;
-        Ok(guard.get(run_id).cloned())
+        if let Some(state) = guard.get(run_id).cloned() {
+            return Ok(Some(state));
+        }
+        // 从磁盘加载历史运行
+        let runs = crate::storage::load_runs()?;
+        Ok(runs.into_iter().find(|r| r.run_id == run_id))
     }
 
-    /// 列出所有活跃的编排运行
+    /// 列出所有编排运行（活跃 + 历史）
     pub fn list_runs(&self) -> Result<Vec<PipelineRunState>> {
         let guard = self
             .active_runs
             .lock()
             .map_err(|_| anyhow!("active runs lock poisoned"))?;
-        Ok(guard.values().cloned().collect())
+        let active: Vec<PipelineRunState> = guard.values().cloned().collect();
+        let historical = crate::storage::load_runs()?;
+        // 合并，去重（活跃状态优先）
+        let mut result = HashMap::new();
+        for r in historical {
+            result.insert(r.run_id.clone(), r);
+        }
+        for r in active {
+            result.insert(r.run_id.clone(), r);
+        }
+        Ok(result.into_values().collect())
     }
 }
 
@@ -284,14 +289,21 @@ fn update_step_state(
     }
 }
 
-fn set_pipeline_status(
+/// 结束编排运行，记录结束时间并持久化
+fn finalize_run(
     active_runs: &Arc<Mutex<HashMap<String, PipelineRunState>>>,
     run_id: &str,
     status: PipelineStatus,
 ) {
+    let mut run = None;
     if let Ok(mut guard) = active_runs.lock() {
         if let Some(run_state) = guard.get_mut(run_id) {
             run_state.status = status;
+            run_state.ended_at = Some(crate::executor::now_epoch());
+            run = Some(run_state.clone());
         }
+    }
+    if let Some(run) = run {
+        let _ = crate::storage::add_run(&run);
     }
 }

@@ -86,6 +86,7 @@ pub enum InstanceStatus {
     Exited {
         code: u32,
     },
+    Killed,
     Error {
         message: String,
     },
@@ -104,6 +105,9 @@ pub struct TaskInstance {
     pub started_at: u64,
     pub ended_at: Option<u64>,
     pub child_pid: Option<u32>,
+    /// 所属编排运行 ID（单独启动时为 None）
+    #[serde(default)]
+    pub run_id: Option<String>,
 }
 
 /// 编排运行中的步骤状态
@@ -129,10 +133,14 @@ pub enum PipelineStatus {
 /// 编排运行状态
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PipelineRunState {
+    pub run_id: String,
     pub pipeline_id: String,
     pub pipeline_name: String,
     pub step_states: Vec<StepState>,
     pub status: PipelineStatus,
+    /// Unix 时间戳
+    pub started_at: u64,
+    pub ended_at: Option<u64>,
 }
 
 /// 实例事件，用于推送给 Flutter 端实时更新

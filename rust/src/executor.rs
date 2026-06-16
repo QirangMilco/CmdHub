@@ -44,8 +44,9 @@ impl RingBuffer {
 
 struct InstanceEntry {
     info: TaskInstance,
-    killer: Box<dyn ChildKiller + Send + Sync>,
+    killer: Option<Box<dyn ChildKiller + Send + Sync>>,
     buffer: RingBuffer,
+    #[allow(dead_code)]
     master: Option<Box<dyn MasterPty + Send>>,
     writer: Option<Box<dyn Write + Send>>,
 }
@@ -63,8 +64,23 @@ pub struct Executor {
 impl Executor {
     pub fn new(buffer_cap: usize) -> Self {
         let (event_tx, _) = broadcast::channel(256);
+        let mut instances = HashMap::new();
+        // 加载历史实例（已退出的）
+        if let Ok(history) = crate::storage::load_instances() {
+            for (info, output) in history {
+                let mut entry = InstanceEntry {
+                    info: info.clone(),
+                    killer: None,
+                    buffer: RingBuffer::new(buffer_cap),
+                    master: None,
+                    writer: None,
+                };
+                entry.buffer.push(&output);
+                instances.insert(info.id.clone(), entry);
+            }
+        }
         Self {
-            instances: Arc::new(Mutex::new(HashMap::new())),
+            instances: Arc::new(Mutex::new(instances)),
             counters: Arc::new(Mutex::new(HashMap::new())),
             buffer_cap,
             event_tx,
@@ -77,7 +93,7 @@ impl Executor {
     }
 
     /// 启动任务，返回实例信息
-    pub fn spawn(&self, task: &Task) -> Result<TaskInstance> {
+    pub fn spawn(&self, task: &Task, run_id: Option<String>) -> Result<TaskInstance> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows: 24,
@@ -146,7 +162,9 @@ impl Executor {
         let mut child = pair.slave.spawn_command(cmd)?;
         let child_pid = child.process_id();
         let killer = child.clone_killer();
-        let _writer = pair.master.take_writer()?;
+        let mut reader = pair.master.try_clone_reader()?;
+        let writer = pair.master.take_writer()?;
+        let master = Some(pair.master);
 
         let instance_id = self.next_instance_id(&task.id);
         let now = now_epoch();
@@ -159,14 +177,15 @@ impl Executor {
             started_at: now,
             ended_at: None,
             child_pid,
+            run_id,
         };
 
         let entry = InstanceEntry {
             info: info.clone(),
-            killer,
+            killer: Some(killer),
             buffer: RingBuffer::new(self.buffer_cap),
-            master: None,
-            writer: None,
+            master,
+            writer: Some(writer),
         };
 
         {
@@ -183,16 +202,6 @@ impl Executor {
         let instances = Arc::clone(&self.instances);
         let instance_id_clone = instance_id.clone();
         let event_tx = self.event_tx.clone();
-        let mut reader = match pair.master.try_clone_reader() {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = event_tx.send(InstanceEvent::Error {
-                    instance_id: instance_id.clone(),
-                    message: format!("failed to clone reader: {}", e),
-                });
-                return Err(anyhow!("failed to clone reader: {}", e));
-            }
-        };
 
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
@@ -233,18 +242,29 @@ impl Executor {
                 if let Some(entry) = guard.get_mut(&instance_id_for_wait) {
                     let ended_at = now_epoch();
                     entry.info.ended_at = Some(ended_at);
-                    entry.info.status = match status {
-                        Ok(exit) => InstanceStatus::Exited {
-                            code: exit.exit_code(),
-                        },
-                        Err(err) => InstanceStatus::Error {
-                            message: err.to_string(),
-                        },
-                    };
+                    // 如果已手动停止，保留 Killed 状态
+                    if !matches!(entry.info.status, InstanceStatus::Killed) {
+                        entry.info.status = match status {
+                            Ok(exit) => InstanceStatus::Exited {
+                                code: exit.exit_code(),
+                            },
+                            Err(err) => InstanceStatus::Error {
+                                message: err.to_string(),
+                            },
+                        };
+                    }
                     exit_info = Some(entry.info.clone());
                 }
             }
             if let Some(info) = exit_info {
+                // 保存实例信息及输出到文件
+                let output = {
+                    let guard = instances.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.get(&instance_id_for_wait)
+                        .map(|e| e.buffer.snapshot())
+                        .unwrap_or_default()
+                };
+                let _ = crate::storage::save_instance(&info, &output);
                 let _ = event_tx.send(InstanceEvent::Exited(info));
             }
         });
@@ -277,7 +297,30 @@ impl Executor {
         let entry = guard
             .get_mut(instance_id)
             .ok_or_else(|| anyhow!("instance not found: {}", instance_id))?;
-        entry.killer.kill()?;
+        if let Some(ref mut killer) = entry.killer {
+            match killer.kill() {
+                Ok(()) => {
+                    // 成功发送终止信号，标记为已手动停止
+                    entry.info.ended_at = Some(now_epoch());
+                    entry.info.status = InstanceStatus::Killed;
+                    let output = entry.buffer.snapshot();
+                    let _ = crate::storage::save_instance(&entry.info, &output);
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    let is_no_such_process =
+                        msg.contains("No such process") || msg.contains("os error 3");
+                    if !is_no_such_process {
+                        return Err(e.into());
+                    }
+                    // 进程已不存在，强制更新为已退出并持久化
+                    entry.info.ended_at = Some(now_epoch());
+                    entry.info.status = InstanceStatus::Exited { code: 0 };
+                    let output = entry.buffer.snapshot();
+                    let _ = crate::storage::save_instance(&entry.info, &output);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -287,10 +330,15 @@ impl Executor {
             .instances
             .lock()
             .map_err(|_| anyhow!("instance lock poisoned"))?;
-        Ok(guard
+        let mut bytes = guard
             .get(instance_id)
             .map(|entry| entry.buffer.snapshot())
-            .unwrap_or_default())
+            .unwrap_or_default();
+        // 过滤掉 EOT 控制字符 (^D, 0x04) 和其他除常用控制字符外的不可打印字符
+        bytes.retain(|&b| {
+            b.is_ascii_graphic() || b.is_ascii_whitespace() || b == b'\n' || b == b'\r' || b == b'\t' || b == b'\x1b' // 保留 ANSI 转义序列
+        });
+        Ok(bytes)
     }
 
     /// 列出所有实例（包括运行中和已退出）
@@ -317,7 +365,11 @@ impl Executor {
             .instances
             .lock()
             .map_err(|_| anyhow!("instance lock poisoned"))?;
-        Ok(guard.remove(instance_id).is_some())
+        let removed = guard.remove(instance_id).is_some();
+        if removed {
+            let _ = crate::storage::remove_instance_files(instance_id);
+        }
+        Ok(removed)
     }
 
     /// 退出应用时清理所有子进程
@@ -327,7 +379,9 @@ impl Executor {
             .lock()
             .map_err(|_| anyhow!("instance lock poisoned"))?;
         for entry in guard.values() {
-            let _ = entry.killer.clone_killer().kill();
+            if let Some(ref killer) = entry.killer {
+                let _ = killer.clone_killer().kill();
+            }
         }
         Ok(())
     }
@@ -355,7 +409,7 @@ impl Executor {
     }
 }
 
-fn now_epoch() -> u64 {
+pub fn now_epoch() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

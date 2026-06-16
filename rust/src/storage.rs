@@ -1,4 +1,4 @@
-use crate::models::{Pipeline, Task};
+use crate::models::{Pipeline, PipelineRunState, Task, TaskInstance};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -31,6 +31,14 @@ fn tasks_path() -> Result<PathBuf> {
 
 fn pipelines_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("pipelines.json"))
+}
+
+fn instances_dir() -> Result<PathBuf> {
+    Ok(data_dir()?.join("instances"))
+}
+
+fn runs_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("runs.json"))
 }
 
 fn ensure_data_dir() -> Result<PathBuf> {
@@ -79,4 +87,99 @@ pub fn save_pipelines(pipelines: &[Pipeline]) -> Result<()> {
     let data = serde_json::to_string_pretty(pipelines)?;
     fs::write(&path, data)?;
     Ok(())
+}
+
+// ============================================================
+// 实例持久化
+// ============================================================
+
+/// 保存已退出实例的信息和输出
+pub fn save_instance(instance: &TaskInstance, output: &[u8]) -> Result<()> {
+    let dir = instances_dir()?;
+    fs::create_dir_all(&dir)?;
+    let info_path = dir.join(format!("{}.json", instance.id));
+    let data = serde_json::to_string_pretty(instance)?;
+    fs::write(&info_path, data)?;
+    let output_path = dir.join(format!("{}.txt", instance.id));
+    fs::write(&output_path, output)?;
+    Ok(())
+}
+
+/// 加载所有历史实例（仅已退出的）
+pub fn load_instances() -> Result<Vec<(TaskInstance, Vec<u8>)>> {
+    let dir = instances_dir()?;
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut results = Vec::new();
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("json") {
+            let data = fs::read_to_string(&path)?;
+            let instance: TaskInstance = serde_json::from_str(&data)
+                .with_context(|| format!("failed to parse {}", path.display()))?;
+            let output_path = path.with_extension("txt");
+            let output = if output_path.exists() {
+                fs::read(&output_path)?
+            } else {
+                Vec::new()
+            };
+            results.push((instance, output));
+        }
+    }
+    Ok(results)
+}
+
+/// 删除实例持久化文件
+pub fn remove_instance_files(instance_id: &str) -> Result<()> {
+    let dir = instances_dir()?;
+    let json_path = dir.join(format!("{}.json", instance_id));
+    let txt_path = dir.join(format!("{}.txt", instance_id));
+    let _ = fs::remove_file(json_path);
+    let _ = fs::remove_file(txt_path);
+    Ok(())
+}
+
+// ============================================================
+// 编排运行持久化
+// ============================================================
+
+/// 保存编排运行
+pub fn save_runs(runs: &[PipelineRunState]) -> Result<()> {
+    ensure_data_dir()?;
+    let path = runs_path()?;
+    let data = serde_json::to_string_pretty(runs)?;
+    fs::write(&path, data)?;
+    Ok(())
+}
+
+/// 加载所有编排运行
+pub fn load_runs() -> Result<Vec<PipelineRunState>> {
+    let path = runs_path()?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let data = fs::read_to_string(&path)?;
+    let runs: Vec<PipelineRunState> = serde_json::from_str(&data)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(runs)
+}
+
+/// 添加或更新单个编排运行
+pub fn add_run(run: &PipelineRunState) -> Result<()> {
+    let mut runs = load_runs()?;
+    if let Some(pos) = runs.iter().position(|r| r.run_id == run.run_id) {
+        runs[pos] = run.clone();
+    } else {
+        runs.push(run.clone());
+    }
+    save_runs(&runs)
+}
+
+/// 删除编排运行
+pub fn remove_run(run_id: &str) -> Result<()> {
+    let mut runs = load_runs()?;
+    runs.retain(|r| r.run_id != run_id);
+    save_runs(&runs)
 }

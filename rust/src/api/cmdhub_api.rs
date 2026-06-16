@@ -178,7 +178,7 @@ pub fn list_pipeline_runs() -> Result<Vec<PipelineRunState>> {
 pub fn spawn_task(task_id: String) -> Result<TaskInstance> {
     let task = get_task(task_id)?
         .ok_or_else(|| anyhow::anyhow!("task not found"))?;
-    executor().spawn(&task)
+    executor().spawn(&task, None)
 }
 
 #[frb]

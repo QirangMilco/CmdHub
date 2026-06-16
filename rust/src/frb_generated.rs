@@ -979,6 +979,9 @@ impl SseDecode for crate::models::InstanceStatus {
                     message: var_message,
                 };
             }
+            3 => {
+                return crate::models::InstanceStatus::Killed;
+            }
             _ => {
                 unimplemented!("");
             }
@@ -1188,15 +1191,21 @@ impl SseDecode for crate::models::Pipeline {
 impl SseDecode for crate::models::PipelineRunState {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_runId = <String>::sse_decode(deserializer);
         let mut var_pipelineId = <String>::sse_decode(deserializer);
         let mut var_pipelineName = <String>::sse_decode(deserializer);
         let mut var_stepStates = <Vec<crate::models::StepState>>::sse_decode(deserializer);
         let mut var_status = <crate::models::PipelineStatus>::sse_decode(deserializer);
+        let mut var_startedAt = <u64>::sse_decode(deserializer);
+        let mut var_endedAt = <Option<u64>>::sse_decode(deserializer);
         return crate::models::PipelineRunState {
+            run_id: var_runId,
             pipeline_id: var_pipelineId,
             pipeline_name: var_pipelineName,
             step_states: var_stepStates,
             status: var_status,
+            started_at: var_startedAt,
+            ended_at: var_endedAt,
         };
     }
 }
@@ -1319,6 +1328,7 @@ impl SseDecode for crate::models::TaskInstance {
         let mut var_startedAt = <u64>::sse_decode(deserializer);
         let mut var_endedAt = <Option<u64>>::sse_decode(deserializer);
         let mut var_childPid = <Option<u32>>::sse_decode(deserializer);
+        let mut var_runId = <Option<String>>::sse_decode(deserializer);
         return crate::models::TaskInstance {
             id: var_id,
             task_id: var_taskId,
@@ -1328,6 +1338,7 @@ impl SseDecode for crate::models::TaskInstance {
             started_at: var_startedAt,
             ended_at: var_endedAt,
             child_pid: var_childPid,
+            run_id: var_runId,
         };
     }
 }
@@ -1480,6 +1491,9 @@ impl flutter_rust_bridge::IntoDart for crate::models::InstanceStatus {
             crate::models::InstanceStatus::Error { message } => {
                 [2.into_dart(), message.into_into_dart().into_dart()].into_dart()
             }
+            crate::models::InstanceStatus::Killed => {
+                [3.into_dart()].into_dart()
+            }
             _ => {
                 unimplemented!("");
             }
@@ -1515,10 +1529,13 @@ impl flutter_rust_bridge::IntoIntoDart<crate::models::Pipeline> for crate::model
 impl flutter_rust_bridge::IntoDart for crate::models::PipelineRunState {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
+            self.run_id.into_into_dart().into_dart(),
             self.pipeline_id.into_into_dart().into_dart(),
             self.pipeline_name.into_into_dart().into_dart(),
             self.step_states.into_into_dart().into_dart(),
             self.status.into_into_dart().into_dart(),
+            self.started_at.into_into_dart().into_dart(),
+            self.ended_at.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1658,6 +1675,7 @@ impl flutter_rust_bridge::IntoDart for crate::models::TaskInstance {
             self.started_at.into_into_dart().into_dart(),
             self.ended_at.into_into_dart().into_dart(),
             self.child_pid.into_into_dart().into_dart(),
+            self.run_id.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1768,6 +1786,9 @@ impl SseEncode for crate::models::InstanceStatus {
             crate::models::InstanceStatus::Error { message } => {
                 <i32>::sse_encode(2, serializer);
                 <String>::sse_encode(message, serializer);
+            }
+            crate::models::InstanceStatus::Killed => {
+                <i32>::sse_encode(3, serializer);
             }
             _ => {
                 unimplemented!("");
@@ -1948,10 +1969,13 @@ impl SseEncode for crate::models::Pipeline {
 impl SseEncode for crate::models::PipelineRunState {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.run_id, serializer);
         <String>::sse_encode(self.pipeline_id, serializer);
         <String>::sse_encode(self.pipeline_name, serializer);
         <Vec<crate::models::StepState>>::sse_encode(self.step_states, serializer);
         <crate::models::PipelineStatus>::sse_encode(self.status, serializer);
+        <u64>::sse_encode(self.started_at, serializer);
+        <Option<u64>>::sse_encode(self.ended_at, serializer);
     }
 }
 
@@ -2062,6 +2086,7 @@ impl SseEncode for crate::models::TaskInstance {
         <u64>::sse_encode(self.started_at, serializer);
         <Option<u64>>::sse_encode(self.ended_at, serializer);
         <Option<u32>>::sse_encode(self.child_pid, serializer);
+        <Option<String>>::sse_encode(self.run_id, serializer);
     }
 }
 

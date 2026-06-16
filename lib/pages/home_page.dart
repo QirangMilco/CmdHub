@@ -1,15 +1,19 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/cmdhub_service.dart';
 import '../src/rust/models.dart';
 import '../theme/app_theme.dart';
 import '../widgets/status_badge.dart';
 import 'instance_detail_page.dart';
+import 'pipeline_editor_page.dart';
 import 'task_editor_page.dart';
 
 /// 桌面端专用布局 — 左侧竖向导航 + 右侧内容区
 /// 无 AppBar，顶部为 plain 标题栏
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  final int initialIndex;
+
+  const HomePage({super.key, this.initialIndex = 0});
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -17,11 +21,13 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   final _service = CmdHubService();
-  int _selectedIndex = 0;
+  late int _selectedIndex;
+  Timer? _pollTimer;
 
   List<Task> _tasks = [];
   List<Pipeline> _pipelines = [];
   List<TaskInstance> _instances = [];
+  List<PipelineRunState> _runs = [];
 
   static const List<_NavItem> _navItems = [
     _NavItem(icon: Icons.terminal_outlined, label: '任务'),
@@ -32,7 +38,15 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+    _selectedIndex = widget.initialIndex;
     _loadData();
+    _pollTimer = Timer.periodic(const Duration(seconds: 1), (_) => _loadData());
+  }
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadData() async {
@@ -41,12 +55,14 @@ class _HomePageState extends State<HomePage> {
         _service.listTasks(),
         _service.listPipelines(),
         _service.listInstances(),
+        _service.listPipelineRuns(),
       ]);
       if (mounted) {
         setState(() {
           _tasks = results[0] as List<Task>;
           _pipelines = results[1] as List<Pipeline>;
           _instances = results[2] as List<TaskInstance>;
+          _runs = results[3] as List<PipelineRunState>;
         });
       }
     } catch (e) {
@@ -68,6 +84,13 @@ class _HomePageState extends State<HomePage> {
     ).then((_) => _loadData());
   }
 
+  void _addPipeline() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const PipelineEditorPage()),
+    ).then((_) => _loadData());
+  }
+
   void _editTask(Task task) {
     Navigator.push(
       context,
@@ -77,13 +100,12 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _runTask(Task task) async {
     try {
-      await _service.spawnTask(task.id);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('已启动: ${task.name}')),
-        );
-      }
+      final instance = await _service.spawnTask(task.id);
       _loadData();
+      if (mounted) {
+        // 自动跳转到实例详情页
+        _viewInstance(instance);
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -114,10 +136,40 @@ class _HomePageState extends State<HomePage> {
 
   // --------------- 编排操作 ---------------
 
+  void _editPipeline(Pipeline pipeline) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => PipelineEditorPage(pipeline: pipeline)),
+    ).then((_) => _loadData());
+  }
+
+  void _deletePipeline(Pipeline pipeline) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        title: Text('删除编排: ${pipeline.name}'),
+        content: const Text('此操作不可撤销'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          TextButton(
+            onPressed: () { Navigator.pop(ctx); _service.deletePipeline(pipeline.id); _loadData(); },
+            style: TextButton.styleFrom(foregroundColor: AppTheme.error),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _runPipeline(Pipeline pipeline) async {
     try {
       await _service.runPipeline(pipeline.id);
       if (mounted) {
+        setState(() {
+          _selectedIndex = 2; // 切换到实例 Tab
+        });
+        _loadData();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('已启动编排: ${pipeline.name}')),
         );
@@ -177,7 +229,7 @@ class _HomePageState extends State<HomePage> {
 
   Widget _buildSideNav(bool isDark) {
     return Container(
-      width: 80,
+      width: 120,
       color: AppTheme.nav(isDark),
       child: SafeArea(
         child: Column(
@@ -268,6 +320,12 @@ class _HomePageState extends State<HomePage> {
               label: '新建',
               onTap: _addTask,
             ),
+          if (_selectedIndex == 1)
+            _HeaderButton(
+              icon: Icons.add,
+              label: '新建',
+              onTap: _addPipeline,
+            ),
           _HeaderButton(
             icon: Icons.refresh,
             onTap: _loadData,
@@ -335,6 +393,8 @@ class _HomePageState extends State<HomePage> {
       itemBuilder: (_, i) => _PipelineCard(
         pipeline: _pipelines[i],
         onRun: () => _runPipeline(_pipelines[i]),
+        onEdit: () => _editPipeline(_pipelines[i]),
+        onDelete: () => _deletePipeline(_pipelines[i]),
       ),
     );
   }
@@ -342,7 +402,7 @@ class _HomePageState extends State<HomePage> {
   // --------------- 实例 Tab ---------------
 
   Widget _buildInstanceTab() {
-    if (_instances.isEmpty) {
+    if (_instances.isEmpty && _runs.isEmpty) {
       return _EmptyState(
         icon: Icons.history_outlined,
         title: '暂无实例',
@@ -350,14 +410,30 @@ class _HomePageState extends State<HomePage> {
       );
     }
 
+    // 分离单独实例和编排实例
+    final standalone = _instances.where((i) => i.runId == null).toList();
+    final Map<String, List<TaskInstance>> runGroups = {};
+    for (final i in _instances.where((i) => i.runId != null)) {
+      runGroups.putIfAbsent(i.runId!, () => []).add(i);
+    }
+
+    // 获取运行映射
+    final runMap = <String, PipelineRunState>{};
+    for (final r in _runs) {
+      runMap[r.runId] = r;
+    }
+
+    // 按开始时间倒序排列运行
+    final sortedRuns = _runs.toList()
+      ..sort((a, b) => b.startedAt.toInt().compareTo(a.startedAt.toInt()));
+
     return RefreshIndicator(
       onRefresh: _loadData,
-      child: ListView.builder(
+      child: ListView(
         padding: const EdgeInsets.all(16),
-        itemCount: _instances.length,
-        itemBuilder: (_, i) {
-          final inst = _instances[i];
-          return _InstanceCard(
+        children: [
+          // 单独实例
+          ...standalone.map((inst) => _InstanceCard(
             instance: inst,
             onTap: () => _viewInstance(inst),
             onKill: inst.status is InstanceStatus_Running
@@ -366,8 +442,33 @@ class _HomePageState extends State<HomePage> {
             onClear: inst.status is! InstanceStatus_Running
                 ? () => _removeInstance(inst)
                 : null,
-          );
-        },
+          )),
+          // 编排运行组
+          ...sortedRuns.map((run) {
+            final runInstances = runGroups[run.runId] ?? [];
+            // 按步骤顺序排序
+            runInstances.sort((a, b) => a.startedAt.toInt().compareTo(b.startedAt.toInt()));
+            return _PipelineRunGroup(
+              run: run,
+              instances: runInstances,
+              onView: _viewInstance,
+              onKill: _killInstance,
+              onClear: _removeInstance,
+            );
+          }),
+          // 孤实例（有 runId 但无对应运行记录）
+          ...runGroups.entries
+              .where((e) => !runMap.containsKey(e.key))
+              .map((entry) {
+            return _PipelineInstanceGroup(
+              runName: '未知运行',
+              instances: entry.value,
+              onView: _viewInstance,
+              onKill: _killInstance,
+              onClear: _removeInstance,
+            );
+          }),
+        ],
       ),
     );
   }
@@ -418,10 +519,22 @@ class _NavButton extends StatelessWidget {
                 // 图标
                 Icon(
                   icon,
-                  size: 22,
+                  size: 20,
                   color: isSelected
                       ? AppTheme.accent
                       : (isDark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary),
+                ),
+                const SizedBox(width: 10),
+                // 文字
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
+                    color: isSelected
+                        ? AppTheme.accent
+                        : (isDark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary),
+                  ),
                 ),
               ],
             ),
@@ -688,8 +801,15 @@ class _ModeTag extends StatelessWidget {
 class _PipelineCard extends StatelessWidget {
   final Pipeline pipeline;
   final VoidCallback onRun;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
 
-  const _PipelineCard({required this.pipeline, required this.onRun});
+  const _PipelineCard({
+    required this.pipeline,
+    required this.onRun,
+    required this.onEdit,
+    required this.onDelete,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -705,41 +825,62 @@ class _PipelineCard extends StatelessWidget {
           width: 1,
         ),
       ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    pipeline.name,
-                    style: TextStyle(
-                      fontWeight: FontWeight.w600,
-                      fontSize: 14,
-                      color: AppTheme.text(isDark),
-                    ),
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          onTap: onEdit,
+          borderRadius: BorderRadius.circular(8),
+          hoverColor: AppTheme.hover(isDark),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        pipeline.name,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 14,
+                          color: AppTheme.text(isDark),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        '${pipeline.steps.length} 个步骤',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: AppTheme.textSecondary(isDark),
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 6),
-                  Text(
-                    '${pipeline.steps.length} 个步骤',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: AppTheme.textSecondary(isDark),
-                    ),
-                  ),
-                ],
-              ),
+                ),
+                const SizedBox(width: 12),
+                _IconAction(
+                  icon: Icons.play_arrow,
+                  color: AppTheme.success,
+                  onTap: onRun,
+                  tooltip: '运行',
+                ),
+                _IconAction(
+                  icon: Icons.edit_outlined,
+                  color: AppTheme.textSecondary(isDark),
+                  onTap: onEdit,
+                  tooltip: '编辑',
+                ),
+                _IconAction(
+                  icon: Icons.delete_outline,
+                  color: AppTheme.error,
+                  onTap: onDelete,
+                  tooltip: '删除',
+                ),
+              ],
             ),
-            const SizedBox(width: 12),
-            _IconAction(
-              icon: Icons.play_arrow,
-              color: AppTheme.success,
-              onTap: onRun,
-              tooltip: '运行',
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -797,17 +938,23 @@ class _InstanceCard extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(height: 6),
-                      StatusBadge(status: instance.status),
-                      const SizedBox(height: 4),
-                      Text(
-                        _formatDuration(
-                          instance.startedAt.toInt(),
-                          instance.endedAt?.toInt(),
-                        ),
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: AppTheme.textSecondary(isDark),
-                        ),
+                      Row(
+                        children: [
+                          _MetaLabel(
+                            label: '开始',
+                            value: _fmtTime(instance.startedAt.toInt()),
+                          ),
+                          const SizedBox(width: 12),
+                          _MetaLabel(
+                            label: '耗时',
+                            value: _fmtDuration(
+                              instance.startedAt.toInt(),
+                              instance.endedAt?.toInt(),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          StatusBadge(status: instance.status),
+                        ],
                       ),
                     ],
                   ),
@@ -835,14 +982,487 @@ class _InstanceCard extends StatelessWidget {
     );
   }
 
-  String _formatDuration(int start, int? end) {
-    final e = end ?? DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final s = e - start;
-    if (s < 60) return '${s}s';
-    if (s < 3600) return '${s ~/ 60}m ${s % 60}s';
-    return '${s ~/ 3600}h ${(s % 3600) ~/ 60}m';
+}
+
+
+// ============================================================
+// 通用辅助函数
+// ============================================================
+
+String _fmtDuration(int start, int? end) {
+  final e = end ?? DateTime.now().millisecondsSinceEpoch ~/ 1000;
+  final s = e - start;
+  if (s < 60) return '${s}s';
+  if (s < 3600) return '${s ~/ 60}m ${s % 60}s';
+  return '${s ~/ 3600}h ${(s % 3600) ~/ 60}m';
+}
+
+String _fmtTime(int epoch) {
+  final dt = DateTime.fromMillisecondsSinceEpoch(epoch * 1000);
+  return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}';
+}
+
+// ============================================================
+// 编排实例组 — 可展开
+// ============================================================
+
+class _PipelineRunGroup extends StatefulWidget {
+  final PipelineRunState run;
+  final List<TaskInstance> instances;
+  final void Function(TaskInstance) onView;
+  final void Function(TaskInstance) onKill;
+  final void Function(TaskInstance) onClear;
+
+  const _PipelineRunGroup({
+    required this.run,
+    required this.instances,
+    required this.onView,
+    required this.onKill,
+    required this.onClear,
+  });
+
+  @override
+  State<_PipelineRunGroup> createState() => _PipelineRunGroupState();
+}
+
+class _PipelineRunGroupState extends State<_PipelineRunGroup> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final run = widget.run;
+    final runningCount = widget.instances.where((i) => i.status is InstanceStatus_Running).length;
+    final totalCount = widget.instances.length;
+    final runDuration = _fmtDuration(run.startedAt.toInt(), run.endedAt?.toInt());
+    final runStatus = run.status == PipelineStatus.running
+        ? '运行中'
+        : (run.status == PipelineStatus.completed ? '已完成' : '失败');
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: AppTheme.card(isDark),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: AppTheme.border(isDark),
+          width: 1,
+        ),
+      ),
+      child: Column(
+        children: [
+          // 父项：点击展开/收起
+          Material(
+            color: Colors.transparent,
+            borderRadius: BorderRadius.vertical(
+              top: const Radius.circular(8),
+              bottom: Radius.circular(_expanded ? 0 : 8),
+            ),
+            child: InkWell(
+              onTap: () => setState(() => _expanded = !_expanded),
+              borderRadius: BorderRadius.vertical(
+                top: const Radius.circular(8),
+                bottom: Radius.circular(_expanded ? 0 : 8),
+              ),
+              hoverColor: AppTheme.hover(isDark),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    Icon(
+                      _expanded ? Icons.expand_less : Icons.expand_more,
+                      size: 20,
+                      color: AppTheme.textSecondary(isDark),
+                    ),
+                    const SizedBox(width: 8),
+                    Icon(
+                      Icons.account_tree_outlined,
+                      size: 18,
+                      color: AppTheme.accent,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            run.pipelineName,
+                            style: TextStyle(
+                              fontWeight: FontWeight.w600,
+                              fontSize: 14,
+                              color: AppTheme.text(isDark),
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Row(
+                            children: [
+                              _MetaLabel(
+                                label: '开始',
+                                value: _fmtTime(run.startedAt.toInt()),
+                              ),
+                              const SizedBox(width: 12),
+                              _MetaLabel(
+                                label: '耗时',
+                                value: runDuration,
+                              ),
+                              const SizedBox(width: 12),
+                              _MetaLabel(
+                                label: '状态',
+                                value: runStatus,
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: AppTheme.border(isDark),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        '$totalCount',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
+                          color: AppTheme.textSecondary(isDark),
+                        ),
+                      ),
+                    ),
+                    if (runningCount > 0) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        width: 8,
+                        height: 8,
+                        decoration: const BoxDecoration(
+                          color: AppTheme.success,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+          // 子项列表
+          if (_expanded)
+            Container(
+              decoration: BoxDecoration(
+                border: Border(
+                  top: BorderSide(color: AppTheme.divider(isDark)),
+                ),
+              ),
+              child: Column(
+                children: widget.instances.map((inst) {
+                  final instDuration = _fmtDuration(inst.startedAt.toInt(), inst.endedAt?.toInt());
+                  return Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    decoration: BoxDecoration(
+                      border: Border(
+                        bottom: BorderSide(color: AppTheme.divider(isDark)),
+                      ),
+                    ),
+                    child: Material(
+                      color: Colors.transparent,
+                      child: InkWell(
+                        onTap: () => widget.onView(inst),
+                        borderRadius: BorderRadius.circular(6),
+                        hoverColor: AppTheme.hover(isDark),
+                        child: Padding(
+                          padding: const EdgeInsets.all(8),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      inst.taskName,
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w500,
+                                        color: AppTheme.text(isDark),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Row(
+                                      children: [
+                                        _MetaLabel(
+                                          label: '开始',
+                                          value: _fmtTime(inst.startedAt.toInt()),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        _MetaLabel(
+                                          label: '耗时',
+                                          value: instDuration,
+                                        ),
+                                        const SizedBox(width: 12),
+                                        StatusBadge(status: inst.status),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              if (inst.status is InstanceStatus_Running)
+                                _IconAction(
+                                  icon: Icons.stop,
+                                  color: AppTheme.error,
+                                  onTap: () => widget.onKill(inst),
+                                  tooltip: '停止',
+                                ),
+                              if (inst.status is! InstanceStatus_Running)
+                                _IconAction(
+                                  icon: Icons.clear,
+                                  color: AppTheme.textMuted(isDark),
+                                  onTap: () => widget.onClear(inst),
+                                  tooltip: '清除',
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 }
+
+class _PipelineInstanceGroup extends StatefulWidget {
+  final String runName;
+  final List<TaskInstance> instances;
+  final void Function(TaskInstance) onView;
+  final void Function(TaskInstance) onKill;
+  final void Function(TaskInstance) onClear;
+
+  const _PipelineInstanceGroup({
+    required this.runName,
+    required this.instances,
+    required this.onView,
+    required this.onKill,
+    required this.onClear,
+  });
+
+  @override
+  State<_PipelineInstanceGroup> createState() => _PipelineInstanceGroupState();
+}
+
+class _PipelineInstanceGroupState extends State<_PipelineInstanceGroup> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final runningCount = widget.instances.where((i) => i.status is InstanceStatus_Running).length;
+    final totalCount = widget.instances.length;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: AppTheme.card(isDark),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: AppTheme.border(isDark),
+          width: 1,
+        ),
+      ),
+      child: Column(
+        children: [
+          Material(
+            color: Colors.transparent,
+            borderRadius: BorderRadius.vertical(
+              top: const Radius.circular(8),
+              bottom: Radius.circular(_expanded ? 0 : 8),
+            ),
+            child: InkWell(
+              onTap: () => setState(() => _expanded = !_expanded),
+              borderRadius: BorderRadius.vertical(
+                top: const Radius.circular(8),
+                bottom: Radius.circular(_expanded ? 0 : 8),
+              ),
+              hoverColor: AppTheme.hover(isDark),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    Icon(
+                      _expanded ? Icons.expand_less : Icons.expand_more,
+                      size: 20,
+                      color: AppTheme.textSecondary(isDark),
+                    ),
+                    const SizedBox(width: 8),
+                    Icon(
+                      Icons.account_tree_outlined,
+                      size: 18,
+                      color: AppTheme.accent,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        widget.runName,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 14,
+                          color: AppTheme.text(isDark),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: AppTheme.border(isDark),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        '$totalCount',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
+                          color: AppTheme.textSecondary(isDark),
+                        ),
+                      ),
+                    ),
+                    if (runningCount > 0) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        width: 8,
+                        height: 8,
+                        decoration: const BoxDecoration(
+                          color: AppTheme.success,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+          if (_expanded)
+            Container(
+              decoration: BoxDecoration(
+                border: Border(
+                  top: BorderSide(color: AppTheme.divider(isDark)),
+                ),
+              ),
+              child: Column(
+                children: widget.instances.map((inst) {
+                  return Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    decoration: BoxDecoration(
+                      border: Border(
+                        bottom: BorderSide(color: AppTheme.divider(isDark)),
+                      ),
+                    ),
+                    child: Material(
+                      color: Colors.transparent,
+                      child: InkWell(
+                        onTap: () => widget.onView(inst),
+                        borderRadius: BorderRadius.circular(6),
+                        hoverColor: AppTheme.hover(isDark),
+                        child: Padding(
+                          padding: const EdgeInsets.all(8),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      inst.taskName,
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w500,
+                                        color: AppTheme.text(isDark),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    StatusBadge(status: inst.status),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              if (inst.status is InstanceStatus_Running)
+                                _IconAction(
+                                  icon: Icons.stop,
+                                  color: AppTheme.error,
+                                  onTap: () => widget.onKill(inst),
+                                  tooltip: '停止',
+                                ),
+                              if (inst.status is! InstanceStatus_Running)
+                                _IconAction(
+                                  icon: Icons.clear,
+                                  color: AppTheme.textMuted(isDark),
+                                  onTap: () => widget.onClear(inst),
+                                  tooltip: '清除',
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+// 元标签
+// ============================================================
+
+class _MetaLabel extends StatelessWidget {
+  final String label;
+  final String value;
+
+  const _MetaLabel({
+    required this.label,
+    required this.value,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return Text.rich(
+      TextSpan(
+        children: [
+          TextSpan(
+            text: '$label: ',
+            style: TextStyle(
+              fontSize: 11,
+              color: AppTheme.textMuted(isDark),
+            ),
+          ),
+          TextSpan(
+            text: value,
+            style: TextStyle(
+              fontSize: 11,
+              color: AppTheme.textSecondary(isDark),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+// 图标操作
+// ============================================================
 
 class _IconAction extends StatelessWidget {
   final IconData icon;

@@ -5,6 +5,7 @@ import '../services/cmdhub_service.dart';
 import '../src/rust/models.dart';
 import '../theme/app_theme.dart';
 import '../widgets/status_badge.dart';
+import 'home_page.dart';
 
 class InstanceDetailPage extends StatefulWidget {
   final String instanceId;
@@ -80,7 +81,10 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
   }
 
   void _copy() async {
-    await Clipboard.setData(ClipboardData(text: _fullOutput));
+    final text = _fullOutput.endsWith('\n')
+        ? _fullOutput.substring(0, _fullOutput.length - 1)
+        : _fullOutput;
+    await Clipboard.setData(ClipboardData(text: text));
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('已复制输出到剪贴板')),
@@ -92,16 +96,14 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
   Widget build(BuildContext context) {
     if (_loading) {
       return Scaffold(
-        body: _buildPlainHeader(context, '实例详情', [])
+        body: _buildHeader(context, '实例详情', null)
       );
     }
 
     final inst = _instance;
     if (inst == null) {
       return Scaffold(
-        body: _buildPlainHeader(context, '实例详情', [
-          _HeaderAction(icon: Icons.arrow_back, onTap: () => Navigator.pop(context)),
-        ]),
+        body: _buildHeader(context, '实例详情', null)
       );
     }
 
@@ -112,128 +114,137 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
     return Scaffold(
       body: Column(
         children: [
-          _buildPlainHeader(context, inst.taskName, [
-            _HeaderAction(icon: Icons.copy, onTap: _copy, tooltip: '复制输出'),
-            _HeaderAction(icon: Icons.refresh, onTap: _poll, tooltip: '刷新'),
-            const SizedBox(width: 4),
-            _HeaderAction(icon: Icons.arrow_back, onTap: () => Navigator.pop(context), tooltip: '返回'),
-          ]),
+          // 顶部：只返回 + 标题
+          _buildHeader(context, inst.taskName, null),
           Expanded(
-            child: Row(
+            child: Column(
               children: [
-                Expanded(
-                  child: Column(
+                // 信息栏：PID 左、命令中、操作右
+                Container(
+                  margin: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: AppTheme.card(isDark),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: AppTheme.border(isDark)),
+                  ),
+                  child: Row(
                     children: [
-                      // 信息栏
-                      Container(
-                        margin: const EdgeInsets.all(16),
-                        padding: const EdgeInsets.all(16),
-                        decoration: BoxDecoration(
-                          color: AppTheme.card(isDark),
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: AppTheme.border(isDark)),
+                      // 左侧：状态 + PID
+                      StatusBadge(status: inst.status),
+                      const SizedBox(width: 12),
+                      if (inst.childPid != null)
+                        Text(
+                          'PID: ${inst.childPid}',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: AppTheme.textSecondary(isDark),
+                          ),
                         ),
-                        child: Row(
-                          children: [
-                            StatusBadge(status: inst.status),
-                            const SizedBox(width: 12),
-                            if (inst.childPid != null)
-                              Text('PID: ${inst.childPid}', style: const TextStyle(fontSize: 13)),
-                            const Spacer(),
-                            Text(
-                              _fmtCmd(inst.command),
-                              style: TextStyle(
-                                fontSize: 11,
-                                fontFamily: 'monospace',
-                                color: AppTheme.textMuted(isDark),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      // 输出
+                      // 中间：命令
                       Expanded(
-                        child: Container(
-                          margin: const EdgeInsets.symmetric(horizontal: 16),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF0D1117),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: const Color(0xFF30363D)),
-                          ),
-                          child: NotificationListener<ScrollNotification>(
-                            onNotification: (n) {
-                              if (n is ScrollEndNotification) {
-                                final max = _scrollController.position.maxScrollExtent;
-                                _autoScroll = _scrollController.position.pixels >= max - 20;
-                              }
-                              return false;
-                            },
-                            child: ListView.builder(
-                              controller: _scrollController,
-                              padding: const EdgeInsets.all(12),
-                              itemCount: lines.length,
-                              itemBuilder: (_, i) => Text(
-                                lines[i],
-                                style: const TextStyle(
-                                  fontFamily: 'monospace',
-                                  fontSize: 13,
-                                  height: 1.5,
-                                  color: Color(0xFFD4D4D4),
-                                ),
-                              ),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: Text(
+                            _fmtCmd(inst.command),
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontFamily: 'monospace',
+                              color: AppTheme.textMuted(isDark),
                             ),
                           ),
                         ),
                       ),
-                      // 输入栏
+                      // 右侧：操作按钮
                       if (isRunning)
-                        Container(
-                          margin: const EdgeInsets.all(16),
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: AppTheme.card(isDark),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: AppTheme.border(isDark)),
-                          ),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: TextField(
-                                  controller: _inputController,
-                                  style: const TextStyle(fontFamily: 'monospace'),
-                                  decoration: const InputDecoration(
-                                    hintText: '输入命令...',
-                                    border: OutlineInputBorder(),
-                                    isDense: true,
-                                    contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-                                  ),
-                                  onSubmitted: (_) => _sendInput(),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              IconButton(
-                                icon: const Icon(Icons.send, color: AppTheme.accent),
-                                onPressed: _sendInput,
-                              ),
-                            ],
-                          ),
+                        _InfoAction(
+                          icon: Icons.stop,
+                          color: AppTheme.error,
+                          onTap: _kill,
+                          tooltip: '停止',
                         ),
-                      if (isRunning)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 16),
-                          child: ElevatedButton.icon(
-                            icon: const Icon(Icons.stop, size: 16),
-                            label: const Text('停止'),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: AppTheme.error,
-                              foregroundColor: Colors.white,
-                            ),
-                            onPressed: _kill,
-                          ),
-                        ),
+                      _InfoAction(
+                        icon: Icons.copy,
+                        onTap: _copy,
+                        tooltip: '复制输出',
+                      ),
+                      _InfoAction(
+                        icon: Icons.refresh,
+                        onTap: _poll,
+                        tooltip: '刷新',
+                      ),
                     ],
                   ),
                 ),
+                // 输出
+                Expanded(
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0D1117),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0xFF30363D)),
+                    ),
+                    child: NotificationListener<ScrollNotification>(
+                      onNotification: (n) {
+                        if (n is ScrollEndNotification) {
+                          final max = _scrollController.position.maxScrollExtent;
+                          _autoScroll = _scrollController.position.pixels >= max - 20;
+                        }
+                        return false;
+                      },
+                      child: ListView.builder(
+                        controller: _scrollController,
+                        padding: const EdgeInsets.all(12),
+                        itemCount: lines.length,
+                        itemBuilder: (_, i) => Text(
+                          lines[i],
+                          style: const TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 13,
+                            height: 1.5,
+                            color: Color(0xFFD4D4D4),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                // 输入栏
+                if (isRunning)
+                  Container(
+                    margin: const EdgeInsets.all(16),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: AppTheme.card(isDark),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: AppTheme.border(isDark)),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _inputController,
+                            style: const TextStyle(fontFamily: 'monospace'),
+                            decoration: const InputDecoration(
+                              hintText: '输入命令...',
+                              border: OutlineInputBorder(),
+                              isDense: true,
+                              contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+                            ),
+                            onSubmitted: (_) => _sendInput(),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        IconButton(
+                          icon: const Icon(Icons.send, color: AppTheme.accent),
+                          onPressed: _sendInput,
+                        ),
+                      ],
+                    ),
+                  ),
+
               ],
             ),
           ),
@@ -242,7 +253,7 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
     );
   }
 
-  Widget _buildPlainHeader(BuildContext context, String title, List<Widget> actions) {
+  Widget _buildHeader(BuildContext context, String title, String? subtitle) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
     return Container(
@@ -254,7 +265,22 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
       ),
       child: Row(
         children: [
-          ...actions,
+          _HeaderAction(
+            icon: Icons.view_list,
+            onTap: () {
+              Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute(builder: (_) => const HomePage(initialIndex: 2)),
+                (route) => false,
+              );
+            },
+            tooltip: '实例列表',
+          ),
+          _HeaderAction(
+            icon: Icons.arrow_back,
+            onTap: () => Navigator.pop(context),
+            tooltip: '返回上一页',
+          ),
           const SizedBox(width: 8),
           Text(
             title,
@@ -269,13 +295,12 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
     );
   }
 
-  String _fmtTime(int epoch) {
-    final dt = DateTime.fromMillisecondsSinceEpoch(epoch * 1000);
-    return '${dt.month}/${dt.day} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
-  }
-
   String _fmtCmd(String c) => c.length > 50 ? '${c.substring(0, 50)}...' : c;
 }
+
+// ============================================================
+// 顶部按钮
+// ============================================================
 
 class _HeaderAction extends StatelessWidget {
   final IconData icon;
@@ -301,6 +326,44 @@ class _HeaderAction extends StatelessWidget {
           child: Container(
             padding: const EdgeInsets.all(8),
             child: Icon(icon, size: 20, color: AppTheme.textSecondary(isDark)),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================
+// 信息栏操作按钮
+// ============================================================
+
+class _InfoAction extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+  final String? tooltip;
+  final Color? color;
+
+  const _InfoAction({
+    required this.icon,
+    required this.onTap,
+    this.tooltip,
+    this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Tooltip(
+      message: tooltip ?? '',
+      child: Material(
+        color: Colors.transparent,
+        shape: const CircleBorder(),
+        child: InkWell(
+          onTap: onTap,
+          customBorder: const CircleBorder(),
+          child: Padding(
+            padding: const EdgeInsets.all(6),
+            child: Icon(icon, size: 18, color: color ?? AppTheme.textSecondary(isDark)),
           ),
         ),
       ),
