@@ -410,65 +410,81 @@ class _HomePageState extends State<HomePage> {
       );
     }
 
-    // 分离单独实例和编排实例
-    final standalone = _instances.where((i) => i.runId == null).toList();
+    // 编排实例按 runId 分组
     final Map<String, List<TaskInstance>> runGroups = {};
     for (final i in _instances.where((i) => i.runId != null)) {
       runGroups.putIfAbsent(i.runId!, () => []).add(i);
     }
 
-    // 获取运行映射
+    // 运行记录索引
     final runMap = <String, PipelineRunState>{};
     for (final r in _runs) {
       runMap[r.runId] = r;
     }
 
-    // 按开始时间倒序排列运行
-    final sortedRuns = _runs.toList()
-      ..sort((a, b) => b.startedAt.toInt().compareTo(a.startedAt.toInt()));
+    // 构建统一列表，每个元素有 startedAt 作为排序键
+    final items = <_InstanceListItem>[];
+
+    // 添加单独实例
+    for (final inst in _instances.where((i) => i.runId == null)) {
+      items.add(_InstanceListItem.solo(
+        startedAt: inst.startedAt.toInt(),
+        builder: (_) => _InstanceCard(
+          instance: inst,
+          onTap: () => _viewInstance(inst),
+          onKill: inst.status is InstanceStatus_Running
+              ? () => _killInstance(inst)
+              : null,
+          onClear: inst.status is! InstanceStatus_Running
+              ? () => _removeInstance(inst)
+              : null,
+        ),
+      ));
+    }
+
+    // 添加编排运行
+    for (final run in _runs) {
+      final runInstances = runGroups[run.runId] ?? [];
+      runInstances.sort((a, b) => a.startedAt.toInt().compareTo(b.startedAt.toInt()));
+      final runStartedAt = run.startedAt.toInt();
+      items.add(_InstanceListItem.run(
+        startedAt: runStartedAt,
+        builder: (_) => _PipelineRunGroup(
+          run: run,
+          instances: runInstances,
+          onView: _viewInstance,
+          onKill: _killInstance,
+          onClear: _removeInstance,
+        ),
+      ));
+    }
+
+    // 添加孤实例（有 runId 但无对应运行记录）
+    for (final entry in runGroups.entries.where((e) => !runMap.containsKey(e.key))) {
+      // 以该组最早实例的时间作为排序键
+      final minStart = entry.value
+          .map((i) => i.startedAt.toInt())
+          .reduce((a, b) => a < b ? a : b);
+      items.add(_InstanceListItem.solo(
+        startedAt: minStart,
+        builder: (_) => _PipelineInstanceGroup(
+          runName: '未知运行',
+          instances: entry.value,
+          onView: _viewInstance,
+          onKill: _killInstance,
+          onClear: _removeInstance,
+        ),
+      ));
+    }
+
+    // 统一按 startedAt 倒序排列
+    items.sort((a, b) => b.startedAt.compareTo(a.startedAt));
 
     return RefreshIndicator(
       onRefresh: _loadData,
       child: ListView(
         padding: const EdgeInsets.all(16),
-        children: [
-          // 单独实例
-          ...standalone.map((inst) => _InstanceCard(
-            instance: inst,
-            onTap: () => _viewInstance(inst),
-            onKill: inst.status is InstanceStatus_Running
-                ? () => _killInstance(inst)
-                : null,
-            onClear: inst.status is! InstanceStatus_Running
-                ? () => _removeInstance(inst)
-                : null,
-          )),
-          // 编排运行组
-          ...sortedRuns.map((run) {
-            final runInstances = runGroups[run.runId] ?? [];
-            // 按步骤顺序排序
-            runInstances.sort((a, b) => a.startedAt.toInt().compareTo(b.startedAt.toInt()));
-            return _PipelineRunGroup(
-              run: run,
-              instances: runInstances,
-              onView: _viewInstance,
-              onKill: _killInstance,
-              onClear: _removeInstance,
-            );
-          }),
-          // 孤实例（有 runId 但无对应运行记录）
-          ...runGroups.entries
-              .where((e) => !runMap.containsKey(e.key))
-              .map((entry) {
-            return _PipelineInstanceGroup(
-              runName: '未知运行',
-              instances: entry.value,
-              onView: _viewInstance,
-              onKill: _killInstance,
-              onClear: _removeInstance,
-            );
-          }),
-        ],
+        children: items.map((item) => item.builder(context)).toList(),
       ),
     );
   }
@@ -1495,6 +1511,32 @@ class _IconAction extends StatelessWidget {
       ),
     );
   }
+}
+
+// ============================================================
+// 实例列表统一排序项
+// ============================================================
+
+class _InstanceListItem {
+  final int startedAt;
+  final Widget Function(BuildContext) builder;
+
+  const _InstanceListItem._({
+    required this.startedAt,
+    required this.builder,
+  });
+
+  factory _InstanceListItem.solo({
+    required int startedAt,
+    required Widget Function(BuildContext) builder,
+  }) =>
+      _InstanceListItem._(startedAt: startedAt, builder: builder);
+
+  factory _InstanceListItem.run({
+    required int startedAt,
+    required Widget Function(BuildContext) builder,
+  }) =>
+      _InstanceListItem._(startedAt: startedAt, builder: builder);
 }
 
 // ============================================================
