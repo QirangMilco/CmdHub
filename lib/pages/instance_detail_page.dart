@@ -122,35 +122,40 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
                 // 信息栏：PID 左、命令中、操作右
                 Container(
                   margin: const EdgeInsets.all(16),
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  height: 44,
                   decoration: BoxDecoration(
                     color: AppTheme.card(isDark),
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(color: AppTheme.border(isDark)),
                   ),
                   child: Stack(
+                    clipBehavior: Clip.none,
                     children: [
-                      // 命令居中
+                      // 命令：严格居中
                       Center(
                         child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 120),
-                          child: Text(
-                            _fmtCmd(inst.command),
-                            textAlign: TextAlign.center,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontFamily: AppTheme.monoFont,
-                              color: AppTheme.textMuted(isDark),
+                          padding: const EdgeInsets.symmetric(horizontal: 200),
+                          child: Tooltip(
+                            message: inst.command,
+                            waitDuration: const Duration(milliseconds: 400),
+                            child: Text(
+                              inst.command,
+                              overflow: TextOverflow.ellipsis,
+                              maxLines: 1,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontFamily: AppTheme.monoFont,
+                                color: AppTheme.textMuted(isDark),
+                              ),
                             ),
                           ),
                         ),
                       ),
                       // 左侧：状态 + PID + 时间
-                      Positioned(
-                        left: 0,
-                        top: 0,
-                        bottom: 0,
+                      Align(
+                        alignment: Alignment.centerLeft,
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
@@ -177,36 +182,29 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
                         ),
                       ),
                       // 右侧：操作按钮
-                      Positioned(
-                        right: 0,
-                        top: 0,
-                        bottom: 0,
+                      Align(
+                        alignment: Alignment.centerRight,
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            if (isRunning)
-                              _InfoAction(
-                                icon: Icons.stop,
-                                color: AppTheme.error,
-                                onTap: _kill,
-                                tooltip: '停止',
-                              ),
+                          if (isRunning)
                             _InfoAction(
-                              icon: Icons.copy,
-                              onTap: _copy,
-                              tooltip: '复制输出',
+                              icon: Icons.stop,
+                              color: AppTheme.error,
+                              onTap: _kill,
+                              tooltip: '停止',
                             ),
-                            _InfoAction(
-                              icon: Icons.refresh,
-                              onTap: _poll,
-                              tooltip: '刷新',
-                            ),
-                          ],
-                        ),
+                          _InfoAction(
+                            icon: Icons.copy,
+                            onTap: _copy,
+                            tooltip: '复制输出',
+                          ),
+                        ],
                       ),
-                    ],
+                    ),
+                  ],
                   ),
-            ),
+                ),
                 // 输出
                 Expanded(
                   child: Container(
@@ -326,7 +324,6 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
     );
   }
 
-  String _fmtCmd(String c) => c.length > 50 ? '${c.substring(0, 50)}...' : c;
 }
 
 // ============================================================
@@ -420,6 +417,8 @@ Widget _timeLabel(String label, String value, bool isDark) {
         ),
       ],
     ),
+    overflow: TextOverflow.ellipsis,
+    maxLines: 1,
   );
 }
 

@@ -452,11 +452,6 @@ class _HomePageState extends State<HomePage> with WindowListener {
               label: '新建',
               onTap: _addPipeline,
             ),
-          if (!isSettings)
-            _HeaderButton(
-              icon: Icons.refresh,
-              onTap: _loadData,
-            ),
         ],
       ),
     );
