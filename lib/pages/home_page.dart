@@ -1,11 +1,17 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:system_tray/system_tray.dart';
+import 'package:window_manager/window_manager.dart';
 import '../services/cmdhub_service.dart';
+import '../services/theme_service.dart';
 import '../src/rust/models.dart';
 import '../theme/app_theme.dart';
 import '../widgets/status_badge.dart';
 import 'instance_detail_page.dart';
 import 'pipeline_editor_page.dart';
+import 'settings_page.dart';
 import 'task_editor_page.dart';
 
 /// 桌面端专用布局 — 左侧竖向导航 + 右侧内容区
@@ -19,7 +25,7 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WindowListener {
   final _service = CmdHubService();
   late int _selectedIndex;
   Timer? _pollTimer;
@@ -33,6 +39,7 @@ class _HomePageState extends State<HomePage> {
     _NavItem(icon: Icons.terminal_outlined, label: '任务'),
     _NavItem(icon: Icons.account_tree_outlined, label: '编排'),
     _NavItem(icon: Icons.history_outlined, label: '实例'),
+    _NavItem(icon: Icons.settings_outlined, label: '设置'),
   ];
 
   @override
@@ -41,13 +48,109 @@ class _HomePageState extends State<HomePage> {
     _selectedIndex = widget.initialIndex;
     _loadData();
     _pollTimer = Timer.periodic(const Duration(seconds: 1), (_) => _loadData());
+
+    windowManager.addListener(this);
+    _initTray();
   }
 
   @override
   void dispose() {
     _pollTimer?.cancel();
+    windowManager.removeListener(this);
     super.dispose();
   }
+
+  // --------------- 窗口管理 ---------------
+
+  @override
+  void onWindowClose() async {
+    // 关闭窗口 → 隐藏到托盘
+    await windowManager.hide();
+    _updateDockVisibility(false);
+  }
+
+  @override
+  void onWindowFocus() {
+    // 窗口获得焦点时确保 Dock 图标可见
+    _updateDockVisibility(true);
+  }
+
+  /// macOS 上控制 Dock 图标显示/隐藏
+  static const _dockChannel = MethodChannel('com.cmdhub/dock');
+  void _updateDockVisibility(bool visible) {
+    if (Platform.isMacOS) {
+      _dockChannel.invokeMethod('setDockVisibility', {'visible': visible});
+    }
+  }
+
+  Future<void> _quitApp() async {
+    try {
+      final instances = await _service.listInstances();
+      for (final inst in instances) {
+        if (inst.status is InstanceStatus_Running) {
+          await _service.killInstance(inst.id);
+        }
+      }
+    } catch (_) {}
+    await windowManager.destroy();
+    exit(0);
+  }
+
+  // --------------- 系统托盘 ---------------
+
+  final SystemTray _systemTray = SystemTray();
+
+  Future<void> _initTray() async {
+    await _systemTray.initSystemTray(
+      iconPath: 'assets/tray_icon.png',
+      toolTip: 'CmdHub',
+    );
+    await _updateTrayMenu();
+
+    _systemTray.registerSystemTrayEventHandler((eventName) {
+      if (eventName == kSystemTrayEventClick) {
+        if (Platform.isMacOS) {
+          _systemTray.popUpContextMenu();
+        } else {
+          windowManager.show();
+          windowManager.focus();
+          _updateDockVisibility(true);
+        }
+      } else if (eventName == kSystemTrayEventRightClick) {
+        if (Platform.isMacOS) {
+          windowManager.show();
+          windowManager.focus();
+          _updateDockVisibility(true);
+        } else {
+          _systemTray.popUpContextMenu();
+        }
+      }
+    });
+  }
+
+  Future<void> _updateTrayMenu() async {
+    final menu = Menu();
+    menu.buildFrom([
+      MenuItemLabel(
+        label: '显示窗口',
+        onClicked: (_) async {
+          await windowManager.show();
+          await windowManager.focus();
+          _updateDockVisibility(true);
+        },
+      ),
+      MenuSeparator(),
+      MenuItemLabel(
+        label: '退出',
+        onClicked: (_) async {
+          await _quitApp();
+        },
+      ),
+    ]);
+    await _systemTray.setContextMenu(menu);
+  }
+
+
 
   Future<void> _loadData() async {
     try {
@@ -229,7 +332,7 @@ class _HomePageState extends State<HomePage> {
 
   Widget _buildSideNav(bool isDark) {
     return Container(
-      width: 120,
+      width: 140,
       color: AppTheme.nav(isDark),
       child: SafeArea(
         child: Column(
@@ -237,13 +340,13 @@ class _HomePageState extends State<HomePage> {
             const SizedBox(height: 20),
             // 简洁图标 Logo
             Container(
-              width: 32,
-              height: 32,
+              width: 40,
+              height: 40,
               decoration: BoxDecoration(
                 color: AppTheme.accent,
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: BorderRadius.circular(10),
               ),
-              child: const Icon(Icons.terminal, color: Colors.white, size: 18),
+              child: const Icon(Icons.terminal, color: Colors.white, size: 22),
             ),
             const SizedBox(height: 28),
             // 导航项
@@ -264,7 +367,7 @@ class _HomePageState extends State<HomePage> {
                 },
               ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
           ],
         ),
       ),
@@ -274,8 +377,9 @@ class _HomePageState extends State<HomePage> {
   // --------------- 顶部标题栏 (48px) ---------------
 
   Widget _buildHeader(bool isDark) {
-    final titles = ['任务', '编排', '实例'];
-    final counts = ['${_tasks.length}', '${_pipelines.length}', '${_instances.length}'];
+    final isSettings = _selectedIndex == 3;
+    final titles = ['任务', '编排', '实例', '设置'];
+    final counts = ['${_tasks.length}', '${_pipelines.length}', '${_instances.length}', ''];
     final isTaskTab = _selectedIndex == 0;
 
     return Container(
@@ -297,39 +401,42 @@ class _HomePageState extends State<HomePage> {
               color: AppTheme.text(isDark),
             ),
           ),
-          const SizedBox(width: 8),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-            decoration: BoxDecoration(
-              color: AppTheme.border(isDark),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Text(
-              counts[_selectedIndex],
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-                color: AppTheme.textSecondary(isDark),
+          if (!isSettings) ...[
+            const SizedBox(width: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                color: AppTheme.border(isDark),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(
+                counts[_selectedIndex],
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                  color: AppTheme.textSecondary(isDark),
+                ),
               ),
             ),
-          ),
+          ],
           const Spacer(),
-          if (isTaskTab)
+          if (!isSettings && isTaskTab)
             _HeaderButton(
               icon: Icons.add,
               label: '新建',
               onTap: _addTask,
             ),
-          if (_selectedIndex == 1)
+          if (!isSettings && _selectedIndex == 1)
             _HeaderButton(
               icon: Icons.add,
               label: '新建',
               onTap: _addPipeline,
             ),
-          _HeaderButton(
-            icon: Icons.refresh,
-            onTap: _loadData,
-          ),
+          if (!isSettings)
+            _HeaderButton(
+              icon: Icons.refresh,
+              onTap: _loadData,
+            ),
         ],
       ),
     );
@@ -344,6 +451,7 @@ class _HomePageState extends State<HomePage> {
         _buildTaskTab(),
         _buildPipelineTab(),
         _buildInstanceTab(),
+        const SettingsPage(),
       ],
     );
   }
@@ -545,7 +653,7 @@ class _NavButton extends StatelessWidget {
                 Text(
                   label,
                   style: TextStyle(
-                    fontSize: 12,
+                    fontSize: 13,
                     fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
                     color: isSelected
                         ? AppTheme.accent

@@ -2,7 +2,9 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
+import 'package:window_manager/window_manager.dart';
 import 'pages/home_page.dart';
+import 'services/theme_service.dart';
 import 'src/rust/frb_generated.dart';
 import 'theme/app_theme.dart';
 
@@ -10,8 +12,6 @@ import 'theme/app_theme.dart';
 // 简单日志系统 —— 带级别控制
 // ============================================================
 
-/// debug 编译输出 Info 及以上，release 只输出 Warn 及以上
-/// 环境变量 CMDBUB_LOG=debug/info/warn/error 可覆盖
 enum _LogLevel { debug, info, warn, error }
 
 _LogLevel _currentLogLevel() {
@@ -59,20 +59,17 @@ void _writeLog(_LogLevel level, String msg) {
       '${_logPrefix(level)} $msg\n',
       mode: FileMode.append,
     );
-  } catch (_) {
-    // 日志不可用时不干扰主流程
-  }
+  } catch (_) {}
+}
+
+String _cmdhubDllPath() {
+  final exeDir = File(Platform.resolvedExecutable).parent.path;
+  return '$exeDir${Platform.pathSeparator}cmdhub_core.dll';
 }
 
 // ============================================================
 // App 入口
 // ============================================================
-
-String _cmdhubDllPath() {
-  // cmdhub_core.dll 应与 exe 同级
-  final exeDir = File(Platform.resolvedExecutable).parent.path;
-  return '$exeDir${Platform.pathSeparator}cmdhub_core.dll';
-}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -80,9 +77,26 @@ Future<void> main() async {
   _writeLog(_LogLevel.info, 'CmdHub starting...');
   _writeLog(_LogLevel.debug, 'log dir: ${_logDir()}');
 
+  // 初始化窗口管理器
+  await windowManager.ensureInitialized();
+  _writeLog(_LogLevel.debug, 'window_manager init ok');
+
+  final windowOptions = WindowOptions(
+    size: const Size(1280, 800),
+    center: true,
+    minimumSize: const Size(900, 600),
+    skipTaskbar: false,
+    titleBarStyle: TitleBarStyle.normal,
+  );
+  windowManager.waitUntilReadyToShow(windowOptions, () async {
+    await windowManager.show();
+    await windowManager.focus();
+    await windowManager.setPreventClose(true);
+  });
+  _writeLog(_LogLevel.debug, 'window options set');
+
+  // 初始化 Rust 桥接
   try {
-    // macOS/Linux：静态链接，从进程查找符号
-    // Windows：cdylib 生成 cmdhub_core.dll，从文件加载
     final library = Platform.isWindows
         ? ExternalLibrary.open(_cmdhubDllPath())
         : ExternalLibrary.process(iKnowHowToUseIt: true);
@@ -91,13 +105,38 @@ Future<void> main() async {
     _writeLog(_LogLevel.error, 'Rust init failed: $e');
     rethrow;
   }
-
   _writeLog(_LogLevel.info, 'Rust init OK');
+
+  // 初始化主题服务
+  final themeService = await ThemeService.init();
+  _writeLog(_LogLevel.debug, 'theme: ${themeService.modeLabel}');
+
   runApp(const CmdHubApp());
 }
 
-class CmdHubApp extends StatelessWidget {
+class CmdHubApp extends StatefulWidget {
   const CmdHubApp({super.key});
+
+  @override
+  State<CmdHubApp> createState() => _CmdHubAppState();
+}
+
+class _CmdHubAppState extends State<CmdHubApp> {
+  late final ThemeService _themeService = ThemeService.instance;
+
+  @override
+  void initState() {
+    super.initState();
+    _themeService.addListener(_onThemeChanged);
+  }
+
+  @override
+  void dispose() {
+    _themeService.removeListener(_onThemeChanged);
+    super.dispose();
+  }
+
+  void _onThemeChanged() => setState(() {});
 
   @override
   Widget build(BuildContext context) {
@@ -107,6 +146,7 @@ class CmdHubApp extends StatelessWidget {
       title: 'CmdHub',
       theme: AppTheme.lightTheme(),
       darkTheme: AppTheme.darkTheme(),
+      themeMode: _themeService.mode,
       home: const HomePage(),
     );
   }

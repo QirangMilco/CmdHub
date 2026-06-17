@@ -34,9 +34,11 @@ dependencies:
   cupertino_icons: ^1.0.8
   flutter_rust_bridge: 2.11.1
   shared_preferences: ^2.0.0
-  uuid: ^4.0.0
+  uuid: ^3.0.7
   path_provider: ^2.1.0
   freezed_annotation: ^2.4.0
+  window_manager: ^0.4.0
+  system_tray: ^2.0.3
   cmdhub_rust:
     path: rust_builder
 
@@ -58,10 +60,8 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
-  # To add assets to your application, add an assets section, like this:
-  # assets:
-  #   - images/a_dot_burr.jpeg
-  #   - images/a_dot_ham.jpeg
+  assets:
+    - assets/tray_icon.png
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images
