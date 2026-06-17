@@ -7,8 +7,8 @@ edition = "2021"
 crate-type = ["cdylib", "staticlib"]
 
 [build-dependencies]
-flutter_rust_bridge_codegen = "=2.9.0"
+flutter_rust_bridge_codegen = "=2.11.1"
 
 [dependencies]
-flutter_rust_bridge = "=2.9.0"
+flutter_rust_bridge = "=2.11.1"
 cmdhub_core = { path = "../rust" }

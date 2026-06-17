@@ -339,7 +339,7 @@ class _StepCardState extends State<_StepCard> {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                 decoration: BoxDecoration(
-                  color: AppTheme.accent.withOpacity(0.08),
+                  color: AppTheme.accent.withValues(alpha: 0.08),
                   borderRadius: BorderRadius.circular(4),
                 ),
                 child: Text(
@@ -364,7 +364,7 @@ class _StepCardState extends State<_StepCard> {
           const SizedBox(height: 12),
           // 任务选择
           DropdownButtonFormField<String>(
-            value: widget.tasks.any((t) => t.id == step.taskId) ? step.taskId : null,
+            initialValue: widget.tasks.any((t) => t.id == step.taskId) ? step.taskId : null,
             decoration: const InputDecoration(
               labelText: '选择任务',
               isDense: true,
@@ -383,7 +383,7 @@ class _StepCardState extends State<_StepCard> {
           const SizedBox(height: 12),
           // 触发条件
           DropdownButtonFormField<StepCondition>(
-            value: step.condition,
+            initialValue: step.condition,
             decoration: const InputDecoration(
               labelText: '触发条件',
               isDense: true,

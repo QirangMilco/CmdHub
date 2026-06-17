@@ -5,7 +5,6 @@ import 'package:flutter/services.dart';
 import 'package:system_tray/system_tray.dart';
 import 'package:window_manager/window_manager.dart';
 import '../services/cmdhub_service.dart';
-import '../services/theme_service.dart';
 import '../src/rust/models.dart';
 import '../theme/app_theme.dart';
 import '../widgets/status_badge.dart';
@@ -29,6 +28,8 @@ class _HomePageState extends State<HomePage> with WindowListener {
   final _service = CmdHubService();
   late int _selectedIndex;
   Timer? _pollTimer;
+  int _lastEventIndex = 0;
+  int _fullRefreshCounter = 0;
 
   List<Task> _tasks = [];
   List<Pipeline> _pipelines = [];
@@ -47,7 +48,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
     super.initState();
     _selectedIndex = widget.initialIndex;
     _loadData();
-    _pollTimer = Timer.periodic(const Duration(seconds: 1), (_) => _loadData());
+    _pollTimer = Timer.periodic(const Duration(seconds: 1), (_) => _pollEvents());
 
     windowManager.addListener(this);
     _initTray();
@@ -151,6 +152,25 @@ class _HomePageState extends State<HomePage> with WindowListener {
   }
 
 
+
+  /// 事件驱动轮询：增量拉取事件，有变化才全量刷新
+  void _pollEvents() {
+    _fullRefreshCounter++;
+    _service.getEventsSince(_lastEventIndex).then((events) {
+      if (events.isNotEmpty) {
+        _lastEventIndex += events.length;
+        _loadData();
+      } else if (_fullRefreshCounter >= 5) {
+        _fullRefreshCounter = 0;
+        _loadData(); // 每 5 秒兜底全量刷新
+      }
+    }).catchError((_) {
+      if (_fullRefreshCounter >= 5) {
+        _fullRefreshCounter = 0;
+        _loadData();
+      }
+    });
+  }
 
   Future<void> _loadData() async {
     try {
@@ -899,12 +919,12 @@ class _ModeTag extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       decoration: BoxDecoration(
         color: interactive
-            ? AppTheme.accent.withOpacity(0.08)
+            ? AppTheme.accent.withValues(alpha: 0.08)
             : Colors.transparent,
         borderRadius: BorderRadius.circular(4),
         border: Border.all(
           color: interactive
-              ? AppTheme.accent.withOpacity(0.25)
+              ? AppTheme.accent.withValues(alpha: 0.25)
               : AppTheme.border(isDark),
         ),
       ),
@@ -1123,7 +1143,7 @@ String _fmtDuration(int start, int? end) {
 
 String _fmtTime(int epoch) {
   final dt = DateTime.fromMillisecondsSinceEpoch(epoch * 1000);
-  return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}';
+  return '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}';
 }
 
 // ============================================================

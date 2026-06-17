@@ -225,15 +225,13 @@ pub fn running_count() -> Result<i32> {
 // 事件流
 // ============================================================
 
-/// 订阅实例事件流
+/// 获取指定索引之后的所有实例事件（增量拉取）
 ///
-/// 返回一个接收端，Dart 侧通过 Stream 消费。
-/// 当前返回的事件是批量轮询模式：Flutter 端定时调用获取增量。
+/// Flutter 端维护一个 last_index，每次调用传入上次的索引，
+/// 只返回新事件，减少不必要的数据传输。
 #[frb]
 pub fn get_instance_events_since(
-    _last_event_index: i32,
+    last_event_index: i32,
 ) -> Result<Vec<InstanceEvent>> {
-    // 简化实现：返回空列表。事件推送通过单独的流式 API 或轮询实现。
-    // 实际使用中，Flutter 端轮询 list_instances() + read_output() 即可。
-    Ok(Vec::new())
+    Ok(executor().events_since(last_event_index as usize))
 }

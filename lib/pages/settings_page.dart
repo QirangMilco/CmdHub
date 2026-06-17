@@ -149,12 +149,12 @@ class _ThemeOption extends StatelessWidget {
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       decoration: BoxDecoration(
         color: selected
-            ? AppTheme.accent.withOpacity(0.08)
+            ? AppTheme.accent.withValues(alpha: 0.08)
             : Colors.transparent,
         borderRadius: BorderRadius.circular(8),
         border: Border.all(
           color: selected
-              ? AppTheme.accent.withOpacity(0.25)
+              ? AppTheme.accent.withValues(alpha: 0.25)
               : Colors.transparent,
         ),
       ),

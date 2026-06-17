@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import '../models.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `executor`, `pipeline_runner`
+// These functions are ignored because they are not marked as `pub`: `executor`, `pipeline_runner`, `tokio_runtime`
 
 Future<Task> createTask({required Task task}) =>
     RustLib.instance.api.crateApiCmdhubApiCreateTask(task: task);
@@ -82,10 +82,10 @@ Future<bool> removeInstance({required String instanceId}) => RustLib
 Future<int> runningCount() =>
     RustLib.instance.api.crateApiCmdhubApiRunningCount();
 
-/// 订阅实例事件流
+/// 获取指定索引之后的所有实例事件（增量拉取）
 ///
-/// 返回一个接收端，Dart 侧通过 Stream 消费。
-/// 当前返回的事件是批量轮询模式：Flutter 端定时调用获取增量。
+/// Flutter 端维护一个 last_index，每次调用传入上次的索引，
+/// 只返回新事件，减少不必要的数据传输。
 Future<List<InstanceEvent>> getInstanceEventsSince({
   required int lastEventIndex,
 }) => RustLib.instance.api.crateApiCmdhubApiGetInstanceEventsSince(

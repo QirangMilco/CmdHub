@@ -762,18 +762,21 @@ mixin _$InstanceStatus {
   TResult when<TResult extends Object?>({
     required TResult Function() running,
     required TResult Function(int code) exited,
+    required TResult Function() killed,
     required TResult Function(String message) error,
   }) => throw _privateConstructorUsedError;
   @optionalTypeArgs
   TResult? whenOrNull<TResult extends Object?>({
     TResult? Function()? running,
     TResult? Function(int code)? exited,
+    TResult? Function()? killed,
     TResult? Function(String message)? error,
   }) => throw _privateConstructorUsedError;
   @optionalTypeArgs
   TResult maybeWhen<TResult extends Object?>({
     TResult Function()? running,
     TResult Function(int code)? exited,
+    TResult Function()? killed,
     TResult Function(String message)? error,
     required TResult orElse(),
   }) => throw _privateConstructorUsedError;
@@ -781,18 +784,21 @@ mixin _$InstanceStatus {
   TResult map<TResult extends Object?>({
     required TResult Function(InstanceStatus_Running value) running,
     required TResult Function(InstanceStatus_Exited value) exited,
+    required TResult Function(InstanceStatus_Killed value) killed,
     required TResult Function(InstanceStatus_Error value) error,
   }) => throw _privateConstructorUsedError;
   @optionalTypeArgs
   TResult? mapOrNull<TResult extends Object?>({
     TResult? Function(InstanceStatus_Running value)? running,
     TResult? Function(InstanceStatus_Exited value)? exited,
+    TResult? Function(InstanceStatus_Killed value)? killed,
     TResult? Function(InstanceStatus_Error value)? error,
   }) => throw _privateConstructorUsedError;
   @optionalTypeArgs
   TResult maybeMap<TResult extends Object?>({
     TResult Function(InstanceStatus_Running value)? running,
     TResult Function(InstanceStatus_Exited value)? exited,
+    TResult Function(InstanceStatus_Killed value)? killed,
     TResult Function(InstanceStatus_Error value)? error,
     required TResult orElse(),
   }) => throw _privateConstructorUsedError;
@@ -866,6 +872,7 @@ class _$InstanceStatus_RunningImpl extends InstanceStatus_Running {
   TResult when<TResult extends Object?>({
     required TResult Function() running,
     required TResult Function(int code) exited,
+    required TResult Function() killed,
     required TResult Function(String message) error,
   }) {
     return running();
@@ -876,6 +883,7 @@ class _$InstanceStatus_RunningImpl extends InstanceStatus_Running {
   TResult? whenOrNull<TResult extends Object?>({
     TResult? Function()? running,
     TResult? Function(int code)? exited,
+    TResult? Function()? killed,
     TResult? Function(String message)? error,
   }) {
     return running?.call();
@@ -886,6 +894,7 @@ class _$InstanceStatus_RunningImpl extends InstanceStatus_Running {
   TResult maybeWhen<TResult extends Object?>({
     TResult Function()? running,
     TResult Function(int code)? exited,
+    TResult Function()? killed,
     TResult Function(String message)? error,
     required TResult orElse(),
   }) {
@@ -900,6 +909,7 @@ class _$InstanceStatus_RunningImpl extends InstanceStatus_Running {
   TResult map<TResult extends Object?>({
     required TResult Function(InstanceStatus_Running value) running,
     required TResult Function(InstanceStatus_Exited value) exited,
+    required TResult Function(InstanceStatus_Killed value) killed,
     required TResult Function(InstanceStatus_Error value) error,
   }) {
     return running(this);
@@ -910,6 +920,7 @@ class _$InstanceStatus_RunningImpl extends InstanceStatus_Running {
   TResult? mapOrNull<TResult extends Object?>({
     TResult? Function(InstanceStatus_Running value)? running,
     TResult? Function(InstanceStatus_Exited value)? exited,
+    TResult? Function(InstanceStatus_Killed value)? killed,
     TResult? Function(InstanceStatus_Error value)? error,
   }) {
     return running?.call(this);
@@ -920,6 +931,7 @@ class _$InstanceStatus_RunningImpl extends InstanceStatus_Running {
   TResult maybeMap<TResult extends Object?>({
     TResult Function(InstanceStatus_Running value)? running,
     TResult Function(InstanceStatus_Exited value)? exited,
+    TResult Function(InstanceStatus_Killed value)? killed,
     TResult Function(InstanceStatus_Error value)? error,
     required TResult orElse(),
   }) {
@@ -1011,6 +1023,7 @@ class _$InstanceStatus_ExitedImpl extends InstanceStatus_Exited {
   TResult when<TResult extends Object?>({
     required TResult Function() running,
     required TResult Function(int code) exited,
+    required TResult Function() killed,
     required TResult Function(String message) error,
   }) {
     return exited(code);
@@ -1021,6 +1034,7 @@ class _$InstanceStatus_ExitedImpl extends InstanceStatus_Exited {
   TResult? whenOrNull<TResult extends Object?>({
     TResult? Function()? running,
     TResult? Function(int code)? exited,
+    TResult? Function()? killed,
     TResult? Function(String message)? error,
   }) {
     return exited?.call(code);
@@ -1031,6 +1045,7 @@ class _$InstanceStatus_ExitedImpl extends InstanceStatus_Exited {
   TResult maybeWhen<TResult extends Object?>({
     TResult Function()? running,
     TResult Function(int code)? exited,
+    TResult Function()? killed,
     TResult Function(String message)? error,
     required TResult orElse(),
   }) {
@@ -1045,6 +1060,7 @@ class _$InstanceStatus_ExitedImpl extends InstanceStatus_Exited {
   TResult map<TResult extends Object?>({
     required TResult Function(InstanceStatus_Running value) running,
     required TResult Function(InstanceStatus_Exited value) exited,
+    required TResult Function(InstanceStatus_Killed value) killed,
     required TResult Function(InstanceStatus_Error value) error,
   }) {
     return exited(this);
@@ -1055,6 +1071,7 @@ class _$InstanceStatus_ExitedImpl extends InstanceStatus_Exited {
   TResult? mapOrNull<TResult extends Object?>({
     TResult? Function(InstanceStatus_Running value)? running,
     TResult? Function(InstanceStatus_Exited value)? exited,
+    TResult? Function(InstanceStatus_Killed value)? killed,
     TResult? Function(InstanceStatus_Error value)? error,
   }) {
     return exited?.call(this);
@@ -1065,6 +1082,7 @@ class _$InstanceStatus_ExitedImpl extends InstanceStatus_Exited {
   TResult maybeMap<TResult extends Object?>({
     TResult Function(InstanceStatus_Running value)? running,
     TResult Function(InstanceStatus_Exited value)? exited,
+    TResult Function(InstanceStatus_Killed value)? killed,
     TResult Function(InstanceStatus_Error value)? error,
     required TResult orElse(),
   }) {
@@ -1087,6 +1105,127 @@ abstract class InstanceStatus_Exited extends InstanceStatus {
   @JsonKey(includeFromJson: false, includeToJson: false)
   _$$InstanceStatus_ExitedImplCopyWith<_$InstanceStatus_ExitedImpl>
   get copyWith => throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class _$$InstanceStatus_KilledImplCopyWith<$Res> {
+  factory _$$InstanceStatus_KilledImplCopyWith(
+    _$InstanceStatus_KilledImpl value,
+    $Res Function(_$InstanceStatus_KilledImpl) then,
+  ) = __$$InstanceStatus_KilledImplCopyWithImpl<$Res>;
+}
+
+/// @nodoc
+class __$$InstanceStatus_KilledImplCopyWithImpl<$Res>
+    extends _$InstanceStatusCopyWithImpl<$Res, _$InstanceStatus_KilledImpl>
+    implements _$$InstanceStatus_KilledImplCopyWith<$Res> {
+  __$$InstanceStatus_KilledImplCopyWithImpl(
+    _$InstanceStatus_KilledImpl _value,
+    $Res Function(_$InstanceStatus_KilledImpl) _then,
+  ) : super(_value, _then);
+
+  /// Create a copy of InstanceStatus
+  /// with the given fields replaced by the non-null parameter values.
+}
+
+/// @nodoc
+
+class _$InstanceStatus_KilledImpl extends InstanceStatus_Killed {
+  const _$InstanceStatus_KilledImpl() : super._();
+
+  @override
+  String toString() {
+    return 'InstanceStatus.killed()';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$InstanceStatus_KilledImpl);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function() running,
+    required TResult Function(int code) exited,
+    required TResult Function() killed,
+    required TResult Function(String message) error,
+  }) {
+    return killed();
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function()? running,
+    TResult? Function(int code)? exited,
+    TResult? Function()? killed,
+    TResult? Function(String message)? error,
+  }) {
+    return killed?.call();
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function()? running,
+    TResult Function(int code)? exited,
+    TResult Function()? killed,
+    TResult Function(String message)? error,
+    required TResult orElse(),
+  }) {
+    if (killed != null) {
+      return killed();
+    }
+    return orElse();
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(InstanceStatus_Running value) running,
+    required TResult Function(InstanceStatus_Exited value) exited,
+    required TResult Function(InstanceStatus_Killed value) killed,
+    required TResult Function(InstanceStatus_Error value) error,
+  }) {
+    return killed(this);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(InstanceStatus_Running value)? running,
+    TResult? Function(InstanceStatus_Exited value)? exited,
+    TResult? Function(InstanceStatus_Killed value)? killed,
+    TResult? Function(InstanceStatus_Error value)? error,
+  }) {
+    return killed?.call(this);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(InstanceStatus_Running value)? running,
+    TResult Function(InstanceStatus_Exited value)? exited,
+    TResult Function(InstanceStatus_Killed value)? killed,
+    TResult Function(InstanceStatus_Error value)? error,
+    required TResult orElse(),
+  }) {
+    if (killed != null) {
+      return killed(this);
+    }
+    return orElse();
+  }
+}
+
+abstract class InstanceStatus_Killed extends InstanceStatus {
+  const factory InstanceStatus_Killed() = _$InstanceStatus_KilledImpl;
+  const InstanceStatus_Killed._() : super._();
 }
 
 /// @nodoc
@@ -1165,6 +1304,7 @@ class _$InstanceStatus_ErrorImpl extends InstanceStatus_Error {
   TResult when<TResult extends Object?>({
     required TResult Function() running,
     required TResult Function(int code) exited,
+    required TResult Function() killed,
     required TResult Function(String message) error,
   }) {
     return error(message);
@@ -1175,6 +1315,7 @@ class _$InstanceStatus_ErrorImpl extends InstanceStatus_Error {
   TResult? whenOrNull<TResult extends Object?>({
     TResult? Function()? running,
     TResult? Function(int code)? exited,
+    TResult? Function()? killed,
     TResult? Function(String message)? error,
   }) {
     return error?.call(message);
@@ -1185,6 +1326,7 @@ class _$InstanceStatus_ErrorImpl extends InstanceStatus_Error {
   TResult maybeWhen<TResult extends Object?>({
     TResult Function()? running,
     TResult Function(int code)? exited,
+    TResult Function()? killed,
     TResult Function(String message)? error,
     required TResult orElse(),
   }) {
@@ -1199,6 +1341,7 @@ class _$InstanceStatus_ErrorImpl extends InstanceStatus_Error {
   TResult map<TResult extends Object?>({
     required TResult Function(InstanceStatus_Running value) running,
     required TResult Function(InstanceStatus_Exited value) exited,
+    required TResult Function(InstanceStatus_Killed value) killed,
     required TResult Function(InstanceStatus_Error value) error,
   }) {
     return error(this);
@@ -1209,6 +1352,7 @@ class _$InstanceStatus_ErrorImpl extends InstanceStatus_Error {
   TResult? mapOrNull<TResult extends Object?>({
     TResult? Function(InstanceStatus_Running value)? running,
     TResult? Function(InstanceStatus_Exited value)? exited,
+    TResult? Function(InstanceStatus_Killed value)? killed,
     TResult? Function(InstanceStatus_Error value)? error,
   }) {
     return error?.call(this);
@@ -1219,6 +1363,7 @@ class _$InstanceStatus_ErrorImpl extends InstanceStatus_Error {
   TResult maybeMap<TResult extends Object?>({
     TResult Function(InstanceStatus_Running value)? running,
     TResult Function(InstanceStatus_Exited value)? exited,
+    TResult Function(InstanceStatus_Killed value)? killed,
     TResult Function(InstanceStatus_Error value)? error,
     required TResult orElse(),
   }) {

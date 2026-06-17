@@ -35,22 +35,9 @@ sealed class InstanceStatus with _$InstanceStatus {
   const factory InstanceStatus.running() = InstanceStatus_Running;
   const factory InstanceStatus.exited({required int code}) =
       InstanceStatus_Exited;
+  const factory InstanceStatus.killed() = InstanceStatus_Killed;
   const factory InstanceStatus.error({required String message}) =
       InstanceStatus_Error;
-}
-
-class InstanceStatus_Killed extends InstanceStatus {
-  const InstanceStatus_Killed() : super._();
-
-  @override
-  String toString() => 'InstanceStatus.killed()';
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) || other is InstanceStatus_Killed;
-
-  @override
-  int get hashCode => runtimeType.hashCode;
 }
 
 /// 编排：一组按顺序执行的任务
@@ -81,6 +68,8 @@ class PipelineRunState {
   final String pipelineName;
   final List<StepState> stepStates;
   final PipelineStatus status;
+
+  /// Unix 时间戳
   final BigInt startedAt;
   final BigInt? endedAt;
 
@@ -253,6 +242,8 @@ class TaskInstance {
   final BigInt startedAt;
   final BigInt? endedAt;
   final int? childPid;
+
+  /// 所属编排运行 ID（单独启动时为 None）
   final String? runId;
 
   const TaskInstance({

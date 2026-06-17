@@ -943,9 +943,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case 1:
         return InstanceStatus_Exited(code: dco_decode_u_32(raw[1]));
       case 2:
-        return InstanceStatus_Error(message: dco_decode_String(raw[1]));
-      case 3:
         return InstanceStatus_Killed();
+      case 3:
+        return InstanceStatus_Error(message: dco_decode_String(raw[1]));
       default:
         throw Exception("unreachable");
     }
@@ -1320,10 +1320,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         var var_code = sse_decode_u_32(deserializer);
         return InstanceStatus_Exited(code: var_code);
       case 2:
+        return InstanceStatus_Killed();
+      case 3:
         var var_message = sse_decode_String(deserializer);
         return InstanceStatus_Error(message: var_message);
-      case 3:
-        return InstanceStatus_Killed();
       default:
         throw UnimplementedError('');
     }
@@ -1821,11 +1821,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case InstanceStatus_Exited(code: final code):
         sse_encode_i_32(1, serializer);
         sse_encode_u_32(code, serializer);
-      case InstanceStatus_Error(message: final message):
-        sse_encode_i_32(2, serializer);
-        sse_encode_String(message, serializer);
       case InstanceStatus_Killed():
+        sse_encode_i_32(2, serializer);
+      case InstanceStatus_Error(message: final message):
         sse_encode_i_32(3, serializer);
+        sse_encode_String(message, serializer);
     }
   }
 

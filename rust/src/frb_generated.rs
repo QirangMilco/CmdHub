@@ -277,13 +277,13 @@ fn wire__crate__api__cmdhub_api__get_instance_events_since_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api__last_event_index = <i32>::sse_decode(&mut deserializer);
+            let api_last_event_index = <i32>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || {
                         let output_ok = crate::api::cmdhub_api::get_instance_events_since(
-                            api__last_event_index,
+                            api_last_event_index,
                         )?;
                         Ok(output_ok)
                     })(),
@@ -974,13 +974,13 @@ impl SseDecode for crate::models::InstanceStatus {
                 return crate::models::InstanceStatus::Exited { code: var_code };
             }
             2 => {
+                return crate::models::InstanceStatus::Killed;
+            }
+            3 => {
                 let mut var_message = <String>::sse_decode(deserializer);
                 return crate::models::InstanceStatus::Error {
                     message: var_message,
                 };
-            }
-            3 => {
-                return crate::models::InstanceStatus::Killed;
             }
             _ => {
                 unimplemented!("");
@@ -1488,11 +1488,9 @@ impl flutter_rust_bridge::IntoDart for crate::models::InstanceStatus {
             crate::models::InstanceStatus::Exited { code } => {
                 [1.into_dart(), code.into_into_dart().into_dart()].into_dart()
             }
+            crate::models::InstanceStatus::Killed => [2.into_dart()].into_dart(),
             crate::models::InstanceStatus::Error { message } => {
-                [2.into_dart(), message.into_into_dart().into_dart()].into_dart()
-            }
-            crate::models::InstanceStatus::Killed => {
-                [3.into_dart()].into_dart()
+                [3.into_dart(), message.into_into_dart().into_dart()].into_dart()
             }
             _ => {
                 unimplemented!("");
@@ -1783,12 +1781,12 @@ impl SseEncode for crate::models::InstanceStatus {
                 <i32>::sse_encode(1, serializer);
                 <u32>::sse_encode(code, serializer);
             }
-            crate::models::InstanceStatus::Error { message } => {
-                <i32>::sse_encode(2, serializer);
-                <String>::sse_encode(message, serializer);
-            }
             crate::models::InstanceStatus::Killed => {
+                <i32>::sse_encode(2, serializer);
+            }
+            crate::models::InstanceStatus::Error { message } => {
                 <i32>::sse_encode(3, serializer);
+                <String>::sse_encode(message, serializer);
             }
             _ => {
                 unimplemented!("");

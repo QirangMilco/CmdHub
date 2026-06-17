@@ -59,12 +59,15 @@ pub struct Executor {
     counters: Arc<Mutex<HashMap<String, u32>>>,
     buffer_cap: usize,
     event_tx: broadcast::Sender<InstanceEvent>,
+    event_log: Arc<Mutex<Vec<(usize, InstanceEvent)>>>,
+    event_counter: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Executor {
     pub fn new(buffer_cap: usize) -> Self {
         let (event_tx, _) = broadcast::channel(256);
         let mut instances = HashMap::new();
+        let event_log = Arc::new(Mutex::new(Vec::new()));
         // 加载历史实例（已退出的）
         if let Ok(history) = crate::storage::load_instances() {
             for (info, output) in history {
@@ -84,12 +87,43 @@ impl Executor {
             counters: Arc::new(Mutex::new(HashMap::new())),
             buffer_cap,
             event_tx,
+            event_log,
+            event_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
     /// 获取事件广播的接收端，供 Flutter 端订阅
     pub fn event_receiver(&self) -> broadcast::Receiver<InstanceEvent> {
         self.event_tx.subscribe()
+    }
+
+    /// 推送事件到广播和事件日志
+    pub fn push_event(&self, event: InstanceEvent) {
+        let idx = self.event_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.event_tx.send(event.clone()).ok();
+        if let Ok(mut log) = self.event_log.lock() {
+            log.push((idx, event));
+            if log.len() > 1000 {
+                log.remove(0);
+            }
+        }
+    }
+
+    /// 获取事件计数器当前值，用于增量拉取
+    pub fn event_count(&self) -> usize {
+        self.event_counter.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 返回指定索引之后的所有事件
+    pub fn events_since(&self, last_index: usize) -> Vec<InstanceEvent> {
+        if let Ok(log) = self.event_log.lock() {
+            log.iter()
+                .filter(|(idx, _)| *idx >= last_index)
+                .map(|(_, event)| event.clone())
+                .collect()
+        } else {
+            Vec::new()
+        }
     }
 
     /// 启动任务，返回实例信息
@@ -196,7 +230,7 @@ impl Executor {
             guard.insert(instance_id.clone(), entry);
         }
 
-        let _ = self.event_tx.send(InstanceEvent::Started(info.clone()));
+        self.push_event(InstanceEvent::Started(info.clone()));
 
         // 后台线程读取 PTY 输出
         let instances = Arc::clone(&self.instances);
@@ -230,6 +264,8 @@ impl Executor {
         let instances = Arc::clone(&self.instances);
         let instance_id_for_wait = instance_id.clone();
         let event_tx = self.event_tx.clone();
+        let event_log = Arc::clone(&self.event_log);
+        let event_counter = Arc::clone(&self.event_counter);
 
         std::thread::spawn(move || {
             let status = child.wait();
@@ -265,7 +301,15 @@ impl Executor {
                         .unwrap_or_default()
                 };
                 let _ = crate::storage::save_instance(&info, &output);
-                let _ = event_tx.send(InstanceEvent::Exited(info));
+                let _ = event_tx.send(InstanceEvent::Exited(info.clone()));
+                // 同时记录到事件日志
+                if let Ok(mut log) = event_log.lock() {
+                    let idx = event_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    log.push((idx, InstanceEvent::Exited(info)));
+                    if log.len() > 1000 {
+                        log.remove(0);
+                    }
+                }
             }
         });
 

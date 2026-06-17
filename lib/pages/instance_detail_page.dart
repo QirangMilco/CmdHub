@@ -128,55 +128,85 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(color: AppTheme.border(isDark)),
                   ),
-                  child: Row(
+                  child: Stack(
                     children: [
-                      // 左侧：状态 + PID
-                      StatusBadge(status: inst.status),
-                      const SizedBox(width: 12),
-                      if (inst.childPid != null)
-                        Text(
-                          'PID: ${inst.childPid}',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: AppTheme.textSecondary(isDark),
-                          ),
-                        ),
-                      // 中间：命令
-                      Expanded(
+                      // 命令居中
+                      Center(
                         child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          padding: const EdgeInsets.symmetric(horizontal: 120),
                           child: Text(
                             _fmtCmd(inst.command),
                             textAlign: TextAlign.center,
+                            overflow: TextOverflow.ellipsis,
                             style: TextStyle(
                               fontSize: 11,
-                              fontFamily: 'monospace',
+                              fontFamily: AppTheme.monoFont,
                               color: AppTheme.textMuted(isDark),
                             ),
                           ),
                         ),
                       ),
-                      // 右侧：操作按钮
-                      if (isRunning)
-                        _InfoAction(
-                          icon: Icons.stop,
-                          color: AppTheme.error,
-                          onTap: _kill,
-                          tooltip: '停止',
+                      // 左侧：状态 + PID + 时间
+                      Positioned(
+                        left: 0,
+                        top: 0,
+                        bottom: 0,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            StatusBadge(status: inst.status),
+                            const SizedBox(width: 8),
+                            if (inst.childPid != null)
+                              Padding(
+                                padding: const EdgeInsets.only(right: 8),
+                                child: Text(
+                                  'PID: ${inst.childPid}',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: AppTheme.textSecondary(isDark),
+                                  ),
+                                ),
+                              ),
+                            _timeLabel('开始', _fmtTime(inst.startedAt.toInt()), isDark),
+                            const SizedBox(width: 8),
+                            _timeLabel('耗时', _fmtDuration(
+                              inst.startedAt.toInt(),
+                              inst.endedAt?.toInt(),
+                            ), isDark),
+                          ],
                         ),
-                      _InfoAction(
-                        icon: Icons.copy,
-                        onTap: _copy,
-                        tooltip: '复制输出',
                       ),
-                      _InfoAction(
-                        icon: Icons.refresh,
-                        onTap: _poll,
-                        tooltip: '刷新',
+                      // 右侧：操作按钮
+                      Positioned(
+                        right: 0,
+                        top: 0,
+                        bottom: 0,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (isRunning)
+                              _InfoAction(
+                                icon: Icons.stop,
+                                color: AppTheme.error,
+                                onTap: _kill,
+                                tooltip: '停止',
+                              ),
+                            _InfoAction(
+                              icon: Icons.copy,
+                              onTap: _copy,
+                              tooltip: '复制输出',
+                            ),
+                            _InfoAction(
+                              icon: Icons.refresh,
+                              onTap: _poll,
+                              tooltip: '刷新',
+                            ),
+                          ],
+                        ),
                       ),
                     ],
                   ),
-                ),
+            ),
                 // 输出
                 Expanded(
                   child: Container(
@@ -266,20 +296,9 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
       child: Row(
         children: [
           _HeaderAction(
-            icon: Icons.view_list,
-            onTap: () {
-              Navigator.pushAndRemoveUntil(
-                context,
-                MaterialPageRoute(builder: (_) => const HomePage(initialIndex: 2)),
-                (route) => false,
-              );
-            },
-            tooltip: '实例列表',
-          ),
-          _HeaderAction(
             icon: Icons.arrow_back,
             onTap: () => Navigator.pop(context),
-            tooltip: '返回上一页',
+            tooltip: '返回',
           ),
           const SizedBox(width: 8),
           Text(
@@ -289,6 +308,18 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
               fontWeight: FontWeight.w600,
               color: AppTheme.text(isDark),
             ),
+          ),
+          const Spacer(),
+          _HeaderAction(
+            icon: Icons.list_alt,
+            onTap: () {
+              Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute(builder: (_) => const HomePage(initialIndex: 2)),
+                (route) => false,
+              );
+            },
+            tooltip: '实例列表',
           ),
         ],
       ),
@@ -369,4 +400,38 @@ class _InfoAction extends StatelessWidget {
       ),
     );
   }
+}
+
+// ============================================================
+// 辅助函数
+// ============================================================
+
+Widget _timeLabel(String label, String value, bool isDark) {
+  return Text.rich(
+    TextSpan(
+      children: [
+        TextSpan(
+          text: '$label: ',
+          style: TextStyle(fontSize: 11, color: AppTheme.textMuted(isDark)),
+        ),
+        TextSpan(
+          text: value,
+          style: TextStyle(fontSize: 11, color: AppTheme.textSecondary(isDark)),
+        ),
+      ],
+    ),
+  );
+}
+
+String _fmtTime(int epoch) {
+  final dt = DateTime.fromMillisecondsSinceEpoch(epoch * 1000);
+  return '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}';
+}
+
+String _fmtDuration(int start, int? end) {
+  final e = end ?? DateTime.now().millisecondsSinceEpoch ~/ 1000;
+  final s = e - start;
+  if (s < 60) return '${s}s';
+  if (s < 3600) return '${s ~/ 60}m ${s % 60}s';
+  return '${s ~/ 3600}h ${(s % 3600) ~/ 60}m';
 }
