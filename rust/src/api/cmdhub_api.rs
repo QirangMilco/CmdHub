@@ -1,3 +1,4 @@
+use crate::frb_generated::StreamSink;
 use crate::executor::Executor;
 use crate::models::{
     InstanceEvent, Pipeline, PipelineRunState, Task, TaskInstance,
@@ -234,4 +235,28 @@ pub fn get_instance_events_since(
     last_event_index: i32,
 ) -> Result<Vec<InstanceEvent>> {
     Ok(executor().events_since(last_event_index as usize))
+}
+
+/// 订阅所有实例事件（推送式）
+///
+/// 返回一个 Dart Stream，事件发生时实时推送。
+#[frb(stream_dart_await)]
+pub fn subscribe_events(sink: StreamSink<InstanceEvent>) {
+    std::thread::spawn(move || {
+        let mut rx = executor().event_receiver();
+        loop {
+            match rx.try_recv() {
+                Ok(event) => {
+                    if sink.add(event).is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+        }
+    });
 }

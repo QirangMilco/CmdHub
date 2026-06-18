@@ -58,6 +58,8 @@ class CmdHubService {
   Future<List<InstanceEvent>> getEventsSince(int lastIndex) =>
       api.getInstanceEventsSince(lastEventIndex: lastIndex);
 
+  Future<Stream<InstanceEvent>> subscribeEvents() => api.subscribeEvents();
+
   // ========================================
   // 编排管理
   // ========================================

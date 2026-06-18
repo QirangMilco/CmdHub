@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 872832314;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1917241248;
 
 // Section: executor
 
@@ -777,6 +777,44 @@ fn wire__crate__api__cmdhub_api__spawn_task_impl(
         },
     )
 }
+fn wire__crate__api__cmdhub_api__subscribe_events_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "subscribe_events",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_sink = <StreamSink<
+                crate::models::InstanceEvent,
+                flutter_rust_bridge::for_generated::SseCodec,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok({
+                        crate::api::cmdhub_api::subscribe_events(api_sink);
+                    })?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__cmdhub_api__update_pipeline_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -900,6 +938,16 @@ impl SseDecode for std::collections::HashMap<String, String> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut inner = <Vec<(String, String)>>::sse_decode(deserializer);
         return inner.into_iter().collect();
+    }
+}
+
+impl SseDecode
+    for StreamSink<crate::models::InstanceEvent, flutter_rust_bridge::for_generated::SseCodec>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <String>::sse_decode(deserializer);
+        return StreamSink::deserialize(inner);
     }
 }
 
@@ -1420,9 +1468,12 @@ fn pde_ffi_dispatcher_primary_impl(
         19 => wire__crate__api__cmdhub_api__run_pipeline_impl(port, ptr, rust_vec_len, data_len),
         20 => wire__crate__api__cmdhub_api__running_count_impl(port, ptr, rust_vec_len, data_len),
         21 => wire__crate__api__cmdhub_api__spawn_task_impl(port, ptr, rust_vec_len, data_len),
-        22 => wire__crate__api__cmdhub_api__update_pipeline_impl(port, ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__cmdhub_api__update_task_impl(port, ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__cmdhub_api__write_input_impl(port, ptr, rust_vec_len, data_len),
+        22 => {
+            wire__crate__api__cmdhub_api__subscribe_events_impl(port, ptr, rust_vec_len, data_len)
+        }
+        23 => wire__crate__api__cmdhub_api__update_pipeline_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__cmdhub_api__update_task_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__cmdhub_api__write_input_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1714,6 +1765,15 @@ impl SseEncode for std::collections::HashMap<String, String> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <Vec<(String, String)>>::sse_encode(self.into_iter().collect(), serializer);
+    }
+}
+
+impl SseEncode
+    for StreamSink<crate::models::InstanceEvent, flutter_rust_bridge::for_generated::SseCodec>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        unimplemented!("")
     }
 }
 

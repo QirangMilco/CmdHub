@@ -27,9 +27,8 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> with WindowListener {
   final _service = CmdHubService();
   late int _selectedIndex;
-  Timer? _pollTimer;
-  int _lastEventIndex = 0;
-  int _fullRefreshCounter = 0;
+  StreamSubscription<InstanceEvent>? _eventSub;
+  Timer? _fallbackTimer;
 
   List<Task> _tasks = [];
   List<Pipeline> _pipelines = [];
@@ -48,7 +47,9 @@ class _HomePageState extends State<HomePage> with WindowListener {
     super.initState();
     _selectedIndex = widget.initialIndex;
     _loadData();
-    _pollTimer = Timer.periodic(const Duration(seconds: 1), (_) => _pollEvents());
+    _initEventStream();
+    // 兜底轮询：每 5 秒全量刷新（防遗漏）
+    _fallbackTimer = Timer.periodic(const Duration(seconds: 5), (_) => _loadData());
 
     windowManager.addListener(this);
     _initTray();
@@ -56,7 +57,8 @@ class _HomePageState extends State<HomePage> with WindowListener {
 
   @override
   void dispose() {
-    _pollTimer?.cancel();
+    _eventSub?.cancel();
+    _fallbackTimer?.cancel();
     windowManager.removeListener(this);
     super.dispose();
   }
@@ -153,23 +155,17 @@ class _HomePageState extends State<HomePage> with WindowListener {
 
 
 
-  /// 事件驱动轮询：增量拉取事件，有变化才全量刷新
-  void _pollEvents() {
-    _fullRefreshCounter++;
-    _service.getEventsSince(_lastEventIndex).then((events) {
-      if (events.isNotEmpty) {
-        _lastEventIndex += events.length;
+  /// 订阅事件流，实时刷新
+  Future<void> _initEventStream() async {
+    try {
+      final stream = await _service.subscribeEvents();
+      _eventSub = stream.listen((event) {
+        // 任何事件都触发全量刷新
         _loadData();
-      } else if (_fullRefreshCounter >= 5) {
-        _fullRefreshCounter = 0;
-        _loadData(); // 每 5 秒兜底全量刷新
-      }
-    }).catchError((_) {
-      if (_fullRefreshCounter >= 5) {
-        _fullRefreshCounter = 0;
-        _loadData();
-      }
-    });
+      });
+    } catch (_) {
+      // 事件流不可用时静默失败，兜底轮询仍会工作
+    }
   }
 
   Future<void> _loadData() async {

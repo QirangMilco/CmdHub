@@ -91,3 +91,9 @@ Future<List<InstanceEvent>> getInstanceEventsSince({
 }) => RustLib.instance.api.crateApiCmdhubApiGetInstanceEventsSince(
   lastEventIndex: lastEventIndex,
 );
+
+/// 订阅所有实例事件（推送式）
+///
+/// 返回一个 Dart Stream，事件发生时实时推送。
+Future<Stream<InstanceEvent>> subscribeEvents() =>
+    RustLib.instance.api.crateApiCmdhubApiSubscribeEvents();

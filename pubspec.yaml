@@ -39,6 +39,7 @@ dependencies:
   freezed_annotation: ^2.4.0
   window_manager: ^0.4.0
   system_tray: ^2.0.3
+  xterm: ^4.0.0
   cmdhub_rust:
     path: rust_builder
 
