@@ -19,46 +19,39 @@ class AppDelegate: FlutterAppDelegate {
       return
     }
 
-    // 键盘快捷键通道（Ctrl+[A-Z] → Dart）
+    // 键盘快捷键通道
     let channel = FlutterMethodChannel(
       name: "com.cmdhub/keyboard",
       binaryMessenger: controller.engine.binaryMessenger
     )
     _keyboardChannel = channel
 
-    // 本地事件监视器：在 NSTextInputContext 之前拦截 Ctrl 组合键
+    // 本地事件监视器：拦截 Ctrl 和 Cmd 组合键
     NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak channel] event in
       guard let channel = channel else { return event }
 
+      // Ctrl+[A-Z] → 控制字符，吞掉不让 NSTextInputContext 拦截
       let ctrlPressed = event.modifierFlags.contains(.control)
       if ctrlPressed,
          let chars = event.charactersIgnoringModifiers,
          chars.count == 1,
          let char = chars.lowercased().first,
          char >= "a" && char <= "z" {
-
-        // Ctrl+A = 1, Ctrl+B = 2, ..., Ctrl+Z = 26
         let code = Int(char.asciiValue!) - 96
         channel.invokeMethod("ctrlSequence", arguments: code)
-        return nil // 吞掉事件，不让它进入 NSTextInputContext
+        return nil
       }
 
-      // Cmd+C → 通知 Dart 端（不吞事件，菜单系统也会处理）
+      // Cmd+C/V → 吞掉不让菜单系统拦截，转发到 Dart 统一处理（TextField + 终端）
       let metaPressed = event.modifierFlags.contains(.command)
-      if metaPressed {
-        if let chars = event.charactersIgnoringModifiers {
-          if chars == "c" {
-            channel.invokeMethod("cmdAction", arguments: "copy")
-            return event
-          }
-          if chars == "v" {
-            channel.invokeMethod("cmdAction", arguments: "paste")
-            return event
-          }
-        }
+      if metaPressed,
+         let chars = event.charactersIgnoringModifiers?.lowercased(),
+         chars == "c" || chars == "v" {
+        channel.invokeMethod("cmdAction", arguments: chars == "c" ? "copy" : "paste")
+        return nil
       }
 
-      return event // 非 Ctrl 事件正常传递
+      return event
     }
 
     // Dock 可见性通道
