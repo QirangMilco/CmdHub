@@ -233,6 +233,9 @@ jobs:
     needs: prepare-release
     env:
       VERSION: ${{ needs.prepare-release.outputs.version }}
+      CARGO_NET_RETRY: 5
+      CARGO_HTTP_TIMEOUT: 120
+      CARGO_HTTP_CHECK_REVOKE: false
 
     steps:
       - name: 检出代码
@@ -278,6 +281,9 @@ jobs:
     needs: prepare-release
     env:
       VERSION: ${{ needs.prepare-release.outputs.version }}
+      CARGO_NET_RETRY: 5
+      CARGO_HTTP_TIMEOUT: 120
+      CARGO_HTTP_CHECK_REVOKE: false
 
     steps:
       - name: 检出代码
@@ -330,6 +336,9 @@ jobs:
     needs: prepare-release
     env:
       VERSION: ${{ needs.prepare-release.outputs.version }}
+      CARGO_NET_RETRY: 5
+      CARGO_HTTP_TIMEOUT: 120
+      CARGO_HTTP_CHECK_REVOKE: false
 
     steps:
       - name: 检出代码
