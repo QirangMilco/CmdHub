@@ -107,8 +107,16 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
     final meta = HardwareKeyboard.instance.isMetaPressed;
     final key = event.logicalKey;
 
-    // Ctrl+C → 发送 \x03 (SIGINT)
+    // Ctrl+C → 有选区时复制，无选区时发送 \x03 (SIGINT)
     if (ctrl && key == LogicalKeyboardKey.keyC) {
+      final sel = _terminalController.selection;
+      if (sel != null) {
+        final text = _terminal.buffer.getText(sel);
+        if (text.isNotEmpty) {
+          Clipboard.setData(ClipboardData(text: text));
+          return KeyEventResult.handled;
+        }
+      }
       _service.writeInput(widget.instanceId, '\x03').catchError((_) {});
       return KeyEventResult.handled;
     }
@@ -194,7 +202,7 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
                       _terminal,
                       controller: _terminalController,
                       autofocus: true,
-                      hardwareKeyboardOnly: false, // 使用 TextInputConnection，支持 IME（中文输入法）；Ctrl 事件在 macOS 上由原生层拦截转发
+                      hardwareKeyboardOnly: Platform.isMacOS ? false : true, // macOS 用 TextInputConnection 支持 IME（Ctrl 由原生层拦截）；其他平台用 HardwareKeyboard 处理输入和快捷键
                       shortcuts: {}, // 禁用 defaultTerminalShortcuts，防止拦截 Cmd+C/Cmd+V
                       onKeyEvent: _handleTerminalKey,
                     ),

@@ -108,8 +108,11 @@ class _HomePageState extends State<HomePage> with WindowListener {
   final SystemTray _systemTray = SystemTray();
 
   Future<void> _initTray() async {
+    final iconFile = Platform.isWindows
+        ? 'assets/tray_icon.ico'
+        : 'assets/tray_icon.png';
     await _systemTray.initSystemTray(
-      iconPath: 'assets/tray_icon.png',
+      iconPath: iconFile,
       toolTip: 'CmdHub',
     );
     await _updateTrayMenu();
