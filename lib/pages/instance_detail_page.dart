@@ -34,7 +34,8 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
       maxLines: 10000,
       platform: TerminalTargetPlatform.macos,
       onOutput: (data) {
-        _service.writeInput(widget.instanceId, data);
+        // 进程退出后 PTY 写端会返回 EIO，静默忽略
+        _service.writeInput(widget.instanceId, data).catchError((_) {});
       },
     );
 
@@ -95,30 +96,30 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
 
     // Ctrl+C → 发送 \x03 (SIGINT)
     if (ctrl && key == LogicalKeyboardKey.keyC) {
-      _service.writeInput(widget.instanceId, '\x03');
+      _service.writeInput(widget.instanceId, '\x03').catchError((_) {});
       return KeyEventResult.handled;
     }
     // Ctrl+D → 发送 \x04 (EOF)
     if (ctrl && key == LogicalKeyboardKey.keyD) {
-      _service.writeInput(widget.instanceId, '\x04');
+      _service.writeInput(widget.instanceId, '\x04').catchError((_) {});
       return KeyEventResult.handled;
     }
     // Ctrl+Z → 发送 \x1a (SIGTSTP)
     if (ctrl && key == LogicalKeyboardKey.keyZ) {
-      _service.writeInput(widget.instanceId, '\x1a');
+      _service.writeInput(widget.instanceId, '\x1a').catchError((_) {});
       return KeyEventResult.handled;
     }
     // Cmd+C → 无选区时发送 \x03，有选区时交给终端复制
     if (meta && key == LogicalKeyboardKey.keyC) {
       final sel = _terminalController.selection;
       if (sel == null) {
-        _service.writeInput(widget.instanceId, '\x03');
+        _service.writeInput(widget.instanceId, '\x03').catchError((_) {});
         return KeyEventResult.handled;
       }
       // 有选区时复制选中文本到剪贴板
       final text = _terminal.buffer.getText(sel);
       if (text.isEmpty) {
-        _service.writeInput(widget.instanceId, '\x03');
+        _service.writeInput(widget.instanceId, '\x03').catchError((_) {});
       } else {
         Clipboard.setData(ClipboardData(text: text));
       }
@@ -128,7 +129,7 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
     if (meta && key == LogicalKeyboardKey.keyV) {
       Clipboard.getData(Clipboard.kTextPlain).then((data) {
         if (data?.text != null) {
-          _service.writeInput(widget.instanceId, data!.text!);
+          _service.writeInput(widget.instanceId, data!.text!).catchError((_) {});
         }
       });
       return KeyEventResult.handled;

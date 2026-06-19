@@ -289,6 +289,8 @@ impl Executor {
                             },
                         };
                     }
+                    // 进程已退出，清掉 writer 防止后续 write_input 返回 EIO
+                    entry.writer = None;
                     exit_info = Some(entry.info.clone());
                 }
             }
@@ -325,6 +327,10 @@ impl Executor {
         let entry = guard
             .get_mut(instance_id)
             .ok_or_else(|| anyhow!("instance not found: {}", instance_id))?;
+        // 进程非运行状态时静默丢弃输入，避免向已关闭的 PTY 写入返回 EIO
+        if !matches!(entry.info.status, InstanceStatus::Running) {
+            return Ok(());
+        }
         if let Some(ref mut writer) = entry.writer {
             writer.write_all(data)?;
             writer.flush()?;
