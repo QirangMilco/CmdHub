@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart';
 import '../services/cmdhub_service.dart';
+import '../services/keyboard_service.dart';
 import '../src/rust/models.dart';
 import '../theme/app_theme.dart';
 import '../widgets/status_badge.dart';
@@ -41,6 +43,14 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
 
     _load();
     _initEventStream();
+    if (Platform.isMacOS) {
+      KeyboardService().register(
+        widget.instanceId,
+        _service,
+        terminalController: _terminalController,
+        terminal: _terminal,
+      );
+    }
     // 实例状态更新：1s 间隔
     _statusTimer = Timer.periodic(const Duration(seconds: 1), (_) => _load());
   }
@@ -49,6 +59,9 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
   void dispose() {
     _eventSub?.cancel();
     _statusTimer?.cancel();
+    if (Platform.isMacOS) {
+      KeyboardService().unregister();
+    }
     super.dispose();
   }
 
@@ -181,7 +194,7 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
                       _terminal,
                       controller: _terminalController,
                       autofocus: true,
-                      hardwareKeyboardOnly: true, // 桌面端用纯硬件键盘，避免 NSTextInputContext 拦截 Ctrl+C 等
+                      hardwareKeyboardOnly: false, // 使用 TextInputConnection，支持 IME（中文输入法）；Ctrl 事件在 macOS 上由原生层拦截转发
                       shortcuts: {}, // 禁用 defaultTerminalShortcuts，防止拦截 Cmd+C/Cmd+V
                       onKeyEvent: _handleTerminalKey,
                     ),

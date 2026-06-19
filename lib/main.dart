@@ -6,6 +6,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:window_manager/window_manager.dart';
 import 'pages/home_page.dart';
 import 'services/theme_service.dart';
+import 'services/keyboard_service.dart';
 import 'src/rust/frb_generated.dart';
 import 'theme/app_theme.dart';
 
@@ -202,8 +203,9 @@ Future<void> main() async {
   final themeService = await ThemeService.init();
   _writeLog(_LogLevel.debug, 'theme: ${themeService.modeLabel}');
 
-  // 初始化 macOS 文本编辑快捷键通道
+  // 初始化键盘快捷键通道
   if (Platform.isMacOS) {
+    KeyboardService().init();
     _initTextEditChannel();
   }
 
