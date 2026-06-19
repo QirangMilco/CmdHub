@@ -18,13 +18,14 @@ class InstanceDetailPage extends StatefulWidget {
 
 class _InstanceDetailPageState extends State<InstanceDetailPage> {
   final _service = CmdHubService();
-  final _inputController = TextEditingController();
   StreamSubscription<InstanceEvent>? _eventSub;
   Timer? _statusTimer;
+
   TaskInstance? _instance;
   String _fullOutput = '';
   bool _loading = true;
   late final Terminal _terminal;
+  final _terminalController = TerminalController();
 
   @override
   void initState() {
@@ -36,6 +37,7 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
         _service.writeInput(widget.instanceId, data);
       },
     );
+
     _load();
     _initEventStream();
     // 实例状态更新：1s 间隔
@@ -46,7 +48,6 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
   void dispose() {
     _eventSub?.cancel();
     _statusTimer?.cancel();
-    _inputController.dispose();
     super.dispose();
   }
 
@@ -79,16 +80,60 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
     }
   }
 
-  void _sendInput() {
-    final t = _inputController.text;
-    if (t.isEmpty) return;
-    _service.writeInput(widget.instanceId, '$t\n');
-    _inputController.clear();
-  }
-
   Future<void> _kill() async {
     await _service.killInstance(widget.instanceId);
     _load();
+  }
+
+  /// 终端键盘事件处理：在 TerminalView 层拦截自定义快捷键
+  /// 返回 ignored 的按键正常流入终端输入处理器
+  KeyEventResult _handleTerminalKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    final ctrl = HardwareKeyboard.instance.isControlPressed;
+    final meta = HardwareKeyboard.instance.isMetaPressed;
+    final key = event.logicalKey;
+
+    // Ctrl+C → 发送 \x03 (SIGINT)
+    if (ctrl && key == LogicalKeyboardKey.keyC) {
+      _service.writeInput(widget.instanceId, '\x03');
+      return KeyEventResult.handled;
+    }
+    // Ctrl+D → 发送 \x04 (EOF)
+    if (ctrl && key == LogicalKeyboardKey.keyD) {
+      _service.writeInput(widget.instanceId, '\x04');
+      return KeyEventResult.handled;
+    }
+    // Ctrl+Z → 发送 \x1a (SIGTSTP)
+    if (ctrl && key == LogicalKeyboardKey.keyZ) {
+      _service.writeInput(widget.instanceId, '\x1a');
+      return KeyEventResult.handled;
+    }
+    // Cmd+C → 无选区时发送 \x03，有选区时交给终端复制
+    if (meta && key == LogicalKeyboardKey.keyC) {
+      final sel = _terminalController.selection;
+      if (sel == null) {
+        _service.writeInput(widget.instanceId, '\x03');
+        return KeyEventResult.handled;
+      }
+      // 有选区时复制选中文本到剪贴板
+      final text = _terminal.buffer.getText(sel);
+      if (text.isEmpty) {
+        _service.writeInput(widget.instanceId, '\x03');
+      } else {
+        Clipboard.setData(ClipboardData(text: text));
+      }
+      return KeyEventResult.handled;
+    }
+    // Cmd+V → 粘贴到 PTY
+    if (meta && key == LogicalKeyboardKey.keyV) {
+      Clipboard.getData(Clipboard.kTextPlain).then((data) {
+        if (data?.text != null) {
+          _service.writeInput(widget.instanceId, data!.text!);
+        }
+      });
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored; // 其他键交给终端输入处理
   }
 
   void _copy() async {
@@ -124,17 +169,23 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
                 _buildInfoBar(inst, isDark, isRunning),
                 Expanded(
                   child: Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 16),
+                    margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
                     decoration: BoxDecoration(
                       color: const Color(0xFF0D1117),
                       borderRadius: BorderRadius.circular(8),
                       border: Border.all(color: const Color(0xFF30363D)),
                     ),
                     clipBehavior: Clip.antiAlias,
-                    child: TerminalView(_terminal),
+                    child: TerminalView(
+                      _terminal,
+                      controller: _terminalController,
+                      autofocus: true,
+                      hardwareKeyboardOnly: true, // 桌面端用纯硬件键盘，避免 NSTextInputContext 拦截 Ctrl+C 等
+                      shortcuts: {}, // 禁用 defaultTerminalShortcuts，防止拦截 Cmd+C/Cmd+V
+                      onKeyEvent: _handleTerminalKey,
+                    ),
                   ),
                 ),
-                if (isRunning) _buildInputBar(isDark),
               ],
             ),
           ),
@@ -213,31 +264,6 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
     );
   }
 
-  Widget _buildInputBar(bool isDark) {
-    return Container(
-      margin: const EdgeInsets.all(16), padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: AppTheme.card(isDark),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: AppTheme.border(isDark)),
-      ),
-      child: Row(children: [
-        Expanded(
-          child: TextField(
-            controller: _inputController,
-            style: TextStyle(fontFamily: 'monospace'),
-            decoration: const InputDecoration(
-              hintText: '输入命令...', border: OutlineInputBorder(),
-              isDense: true, contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-            ),
-            onSubmitted: (_) => _sendInput(),
-          ),
-        ),
-        const SizedBox(width: 8),
-        IconButton(icon: const Icon(Icons.send, color: AppTheme.accent), onPressed: _sendInput),
-      ]),
-    );
-  }
 }
 
 // ============================================================

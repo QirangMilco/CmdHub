@@ -65,6 +65,8 @@ class _HomePageState extends State<HomePage> with WindowListener {
 
   // --------------- 窗口管理 ---------------
 
+  bool _dockVisible = true; // 跟踪 Dock 可见状态，避免冗余调用
+
   @override
   void onWindowClose() async {
     // 关闭窗口 → 隐藏到托盘
@@ -81,6 +83,8 @@ class _HomePageState extends State<HomePage> with WindowListener {
   /// macOS 上控制 Dock 图标显示/隐藏
   static const _dockChannel = MethodChannel('com.cmdhub/dock');
   void _updateDockVisibility(bool visible) {
+    if (visible == _dockVisible) return; // 状态未变化，跳过
+    _dockVisible = visible;
     if (Platform.isMacOS) {
       _dockChannel.invokeMethod('setDockVisibility', {'visible': visible});
     }

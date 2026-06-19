@@ -12,7 +12,6 @@ class AppDelegate: FlutterAppDelegate {
   }
 
   override func applicationDidFinishLaunching(_ notification: Notification) {
-    // 通过主窗口获取 Flutter 视图控制器
     guard let window = NSApplication.shared.windows.first(where: { $0.contentViewController is FlutterViewController }),
           let controller = window.contentViewController as? FlutterViewController else {
       return
