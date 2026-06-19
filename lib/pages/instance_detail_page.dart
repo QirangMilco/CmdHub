@@ -146,11 +146,22 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
       }
       return KeyEventResult.handled;
     }
-    // Cmd+V → 粘贴到 PTY
+    // Ctrl+V → 粘贴到 PTY
+    if (ctrl && key == LogicalKeyboardKey.keyV) {
+      Clipboard.getData(Clipboard.kTextPlain).then((data) {
+        final text = data?.text;
+        if (text != null && text.isNotEmpty) {
+          _service.writeInput(widget.instanceId, text).catchError((_) {});
+        }
+      });
+      return KeyEventResult.handled;
+    }
+    // Cmd+V → 粘贴到 PTY（macOS）
     if (meta && key == LogicalKeyboardKey.keyV) {
       Clipboard.getData(Clipboard.kTextPlain).then((data) {
-        if (data?.text != null) {
-          _service.writeInput(widget.instanceId, data!.text!).catchError((_) {});
+        final text = data?.text;
+        if (text != null && text.isNotEmpty) {
+          _service.writeInput(widget.instanceId, text).catchError((_) {});
         }
       });
       return KeyEventResult.handled;
@@ -202,7 +213,7 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
                       _terminal,
                       controller: _terminalController,
                       autofocus: true,
-                      hardwareKeyboardOnly: Platform.isMacOS ? false : true, // macOS 用 TextInputConnection 支持 IME（Ctrl 由原生层拦截）；其他平台用 HardwareKeyboard 处理输入和快捷键
+                      hardwareKeyboardOnly: false, // 启用 TextInputConnection 支持 IME（中文输入法）；Ctrl/Cmd 快捷键由各平台对应层处理
                       shortcuts: {}, // 禁用 defaultTerminalShortcuts，防止拦截 Cmd+C/Cmd+V
                       onKeyEvent: _handleTerminalKey,
                     ),
