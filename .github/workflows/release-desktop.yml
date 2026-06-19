@@ -120,10 +120,13 @@ jobs:
 
           echo "Generating notes for range: ${RANGE:-ALL}"
 
-          NOTES="# What's Changed\n\n"
+          # ---------- 中文版 ----------
+          CN="# 更新内容\n\n"
 
-          # 按类型分组
-          for section in "feat|✨ New Features" "fix|🐛 Bug Fixes" "refactor|🔄 Refactoring" "docs|📖 Documentation" "chore|⚙️ Chores" "test|🧪 Tests"; do
+          # CN_FULL 收集所有带描述的提交（用来去重，让英/中文各显示一次）
+          CN_DEDUP=""
+
+          for section in "feat|✨ 新功能" "fix|🐛 修复问题" "refactor|🔄 重构" "docs|📖 文档" "chore|🧹 构建与配置" "test|🧪 测试"; do
             prefix="${section%%|*}"
             label="${section##*|}"
 
@@ -134,17 +137,17 @@ jobs:
             fi
 
             if [[ -n "$commits" ]]; then
-              NOTES+="## $label\n"
+              CN+="## $label\n"
               while IFS= read -r line; do
-                # 去掉类型前缀，保留描述
                 desc=$(echo "$line" | sed -E 's/^[a-zA-Z]+(\([^)]*\))?:\s*//')
-                NOTES+="- $desc\n"
+                CN+="- $desc\n"
+                CN_DEDUP+="$line\n"
               done <<< "$commits"
-              NOTES+="\n"
+              CN+="\n"
             fi
           done
 
-          # 其他未分类的提交
+          # 其他未分类的提交（中文）
           if [[ -z "$RANGE" ]]; then
             other=$(git log --format="%s" --no-merges | grep -vi "^feat\|^fix\|^refactor\|^docs\|^chore\|^test" || true)
           else
@@ -152,17 +155,61 @@ jobs:
           fi
 
           if [[ -n "$other" ]]; then
-            NOTES+="## Other Changes\n"
+            CN+="## 其他\n"
             while IFS= read -r line; do
-              NOTES+="- $line\n"
+              CN+="- $line\n"
+              CN_DEDUP+="$line\n"
             done <<< "$other"
-            NOTES+="\n"
+            CN+="\n"
           fi
 
-          # Full Changelog 链接
           if [[ -n "$RANGE" ]]; then
-            NOTES+="**Full Changelog**: https://github.com/${{ github.repository }}/compare/$RANGE\n"
+            CN+="**完整更新日志**: https://github.com/${{ github.repository }}/compare/$RANGE\n"
           fi
+
+          # ---------- 英文版 ----------
+          EN="\n------\n\n# What's Changed\n\n"
+
+          for section in "feat|✨ New Features" "fix|🐛 Bug Fixes" "refactor|🔄 Refactoring" "docs|📖 Documentation" "chore|🧹 Build & Config" "test|🧪 Tests"; do
+            prefix="${section%%|*}"
+            label="${section##*|}"
+
+            if [[ -z "$RANGE" ]]; then
+              commits=$(git log --format="%s" --no-merges | grep -i "^$prefix" || true)
+            else
+              commits=$(git log "$RANGE" --format="%s" --no-merges | grep -i "^$prefix" || true)
+            fi
+
+            if [[ -n "$commits" ]]; then
+              EN+="## $label\n"
+              while IFS= read -r line; do
+                desc=$(echo "$line" | sed -E 's/^[a-zA-Z]+(\([^)]*\))?:\s*//')
+                EN+="- $desc\n"
+              done <<< "$commits"
+              EN+="\n"
+            fi
+          done
+
+          # 其他未分类的提交（英文）
+          if [[ -z "$RANGE" ]]; then
+            other=$(git log --format="%s" --no-merges | grep -vi "^feat\|^fix\|^refactor\|^docs\|^chore\|^test" || true)
+          else
+            other=$(git log "$RANGE" --format="%s" --no-merges | grep -vi "^feat\|^fix\|^refactor\|^docs\|^chore\|^test" || true)
+          fi
+
+          if [[ -n "$other" ]]; then
+            EN+="## Other Changes\n"
+            while IFS= read -r line; do
+              EN+="- $line\n"
+            done <<< "$other"
+            EN+="\n"
+          fi
+
+          if [[ -n "$RANGE" ]]; then
+            EN+="**Full Changelog**: https://github.com/${{ github.repository }}/compare/$RANGE\n"
+          fi
+
+          NOTES="${CN}${EN}"
 
           echo "notes<<EOF" >> "$GITHUB_OUTPUT"
           echo -e "$NOTES" >> "$GITHUB_OUTPUT"

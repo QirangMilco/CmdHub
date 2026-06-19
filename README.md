@@ -1,4 +1,4 @@
-# cmdhub
+# CmdHub
 
 A new Flutter project.
 
