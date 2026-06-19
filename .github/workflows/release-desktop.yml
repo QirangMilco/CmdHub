@@ -44,6 +44,7 @@ jobs:
       draft: ${{ steps.meta.outputs.draft }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
 
+
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -97,6 +98,87 @@ jobs:
           echo "Title: $TITLE"
           echo "Draft: $DRAFT"
           echo "Prerelease: $PRERELEASE"
+
+      - name: 生成 Release Notes
+        id: notes
+        shell: bash
+        run: |
+          TAG_NAME='${{ github.ref_name }}'
+          if [[ '${{ github.event_name }}' == 'workflow_dispatch' ]]; then
+            TAG_NAME="v${{ inputs.version }}"
+          fi
+
+          # 找到前一个版本 tag（按 semver 排序的倒数第二个 tag）
+          PREV_TAG=$(git tag --sort=-version:refname | head -n 2 | tail -n 1 || true)
+
+          if [[ -z "$PREV_TAG" || "$PREV_TAG" == "$TAG_NAME" ]]; then
+            # 没有之前的 tag，使用所有提交
+            RANGE=""
+          else
+            RANGE="$PREV_TAG..$TAG_NAME"
+          fi
+
+          echo "Generating notes for range: ${RANGE:-ALL}"
+
+          NOTES="# What's Changed\n\n"
+
+          # 按类型分组
+          for section in "feat|✨ New Features" "fix|🐛 Bug Fixes" "refactor|🔄 Refactoring" "docs|📖 Documentation" "chore|⚙️ Chores" "test|🧪 Tests"; do
+            prefix="${section%%|*}"
+            label="${section##*|}"
+
+            if [[ -z "$RANGE" ]]; then
+              commits=$(git log --format="%s" --no-merges | grep -i "^$prefix" || true)
+            else
+              commits=$(git log "$RANGE" --format="%s" --no-merges | grep -i "^$prefix" || true)
+            fi
+
+            if [[ -n "$commits" ]]; then
+              NOTES+="## $label\n"
+              while IFS= read -r line; do
+                # 去掉类型前缀，保留描述
+                desc=$(echo "$line" | sed -E 's/^[a-zA-Z]+(\([^)]*\))?:\s*//')
+                NOTES+="- $desc\n"
+              done <<< "$commits"
+              NOTES+="\n"
+            fi
+          done
+
+          # 其他未分类的提交
+          if [[ -z "$RANGE" ]]; then
+            other=$(git log --format="%s" --no-merges | grep -vi "^feat\|^fix\|^refactor\|^docs\|^chore\|^test" || true)
+          else
+            other=$(git log "$RANGE" --format="%s" --no-merges | grep -vi "^feat\|^fix\|^refactor\|^docs\|^chore\|^test" || true)
+          fi
+
+          if [[ -n "$other" ]]; then
+            NOTES+="## Other Changes\n"
+            while IFS= read -r line; do
+              NOTES+="- $line\n"
+            done <<< "$other"
+            NOTES+="\n"
+          fi
+
+          # Full Changelog 链接
+          if [[ -n "$RANGE" ]]; then
+            NOTES+="**Full Changelog**: https://github.com/${{ github.repository }}/compare/$RANGE\n"
+          fi
+
+          echo "notes<<EOF" >> "$GITHUB_OUTPUT"
+          echo -e "$NOTES" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          echo "=== Generated Release Notes ==="
+          echo -e "$NOTES"
+
+          # 写入文件用于跨 job 传递
+          echo -e "$NOTES" > /tmp/release-notes.md
+
+      - name: 上传 Release Notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: /tmp/release-notes.md
 
   build-macos-arm64:
     name: 构建 macOS arm64
@@ -279,11 +361,19 @@ jobs:
           merge-multiple: true
           path: release-assets
 
+      - name: 下载 Release Notes
+        uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: /tmp
+
       - name: 列出产物
         shell: bash
         run: |
           echo "Release assets:"
           find release-assets -maxdepth 2 -type f | sort
+          echo "Release notes:"
+          cat /tmp/release-notes.md
 
       - name: 创建或更新 Release
         shell: bash
@@ -315,10 +405,11 @@ jobs:
             gh release upload "$TAG" "${FILES[@]}" --clobber --repo "$GH_REPO"
           else
             echo "创建 Release $TAG"
+
             CREATE_ARGS=(
               --target "$REF"
               --title "$TITLE"
-              --generate-notes
+              --notes-file /tmp/release-notes.md
             )
 
             if [[ "$DRAFT" == 'true' ]]; then
