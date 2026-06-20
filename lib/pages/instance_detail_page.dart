@@ -213,7 +213,7 @@ class _InstanceDetailPageState extends State<InstanceDetailPage> {
                       _terminal,
                       controller: _terminalController,
                       autofocus: true,
-                      hardwareKeyboardOnly: false, // 启用 TextInputConnection 支持 IME（中文输入法）；Ctrl/Cmd 快捷键由各平台对应层处理
+                      hardwareKeyboardOnly: Platform.isMacOS ? false : true, // macOS 用 TextInputConnection 支持 IME（Ctrl 由原生层拦截）；其他平台用硬件键盘直接输入
                       shortcuts: {}, // 禁用 defaultTerminalShortcuts，防止拦截 Cmd+C/Cmd+V
                       onKeyEvent: _handleTerminalKey,
                     ),
